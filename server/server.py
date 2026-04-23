@@ -16,6 +16,7 @@ import config
 import scrape_runs
 from analyzer import analyze, analyze_pagination
 from logger import make_logger
+from pattern_discovery import discover as discover_patterns
 from providers import provider_health
 
 log = make_logger("server")
@@ -111,6 +112,25 @@ def analyze_pagination_endpoint():
         log.error("route_analyze_pagination_failed", phase="error", url=url, err=str(e))
         return jsonify({"error": str(e)}), 500
 
+    return jsonify(result)
+
+
+# ─── /discover-patterns ────────────────────────────────────────────────────
+
+@app.route("/discover-patterns", methods=["POST"])
+def discover_patterns_endpoint():
+    data = request.get_json(silent=True) or {}
+    target = data.get("url") or data.get("domain") or ""
+    if not target:
+        return jsonify({"error": "Missing 'url' or 'domain' field"}), 400
+    log.info("route_discover_patterns", phase="mutate", target=target)
+    try:
+        result = discover_patterns(target)
+    except Exception as e:
+        log.error("route_discover_patterns_failed", phase="error", target=target, err=str(e))
+        return jsonify({"error": str(e)}), 500
+    if "error" in result:
+        return jsonify(result), 400
     return jsonify(result)
 
 
