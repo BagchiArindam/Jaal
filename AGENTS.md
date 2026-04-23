@@ -65,9 +65,10 @@ Legacy `SORTSIGHT_AI_PROVIDER` is read as a fallback during the deprecation wind
 
 ## Conventions
 
-- **Languages:** Python 3.11+ (`server/`), modern JS ESM (`shared/`, `extension/`), userscript-flavored JS (`userscript/`).
+- **Languages:** Python 3.11+ (`server/`), classic-script JS (`shared/`, `extension/`), userscript-flavored JS (`userscript/`).
+- **JS module style:** IIFE + `window.Jaal.<module>` global namespace — **not ES modules**. Extension MV2 content scripts and Tampermonkey both ship better with classic scripts; the `build/build-userscript.mjs` step just concatenates files in order.
 - **No TypeScript** in any variant — keep the build chain minimal.
-- **Import rule:** `extension/` and `userscript/` may import from `shared/`, never the other way around. `shared/` has no DOM side effects on import — only function exports.
+- **Dependency rule:** `extension/` and `userscript/` may use `shared/` modules, never the other way around. `shared/` modules register themselves on `window.Jaal` without any DOM side effects on load.
 - **Context menu id:** `jaal-pick` (not `sortsight-pick`).
 - **CSS isolation:** all injected UI uses Shadow DOM so host site styles don't bleed in.
 - **Userscript data:** any persistent data stored via `GM_setValue` ships with export-to-JSON + import-from-JSON buttons in a `⚙️ Settings` panel, plus a blinking backup-age indicator (per global `~/.claude/CLAUDE.md`).
@@ -76,7 +77,7 @@ Legacy `SORTSIGHT_AI_PROVIDER` is read as a fallback during the deprecation wind
 
 Every file — JS or Python — logs at: initialization, DOM query / network call, mutation, error. Use the shared logger:
 
-- JS: `import { makeLogger } from '../shared/logger.js'` then `const log = makeLogger('<component>', 'js')`
+- JS: load `shared/logger.js` first, then `const log = window.Jaal.makeLogger('<component>')`
 - Python: `from logger import make_logger` then `log = make_logger('<component>')`
 
 One log line = one JSON object with fields: `ts`, `project` (`"jaal"`), `lang` (`js|py`), `phase` (`init|load|mutate|teardown|error`), `level` (`debug|info|warn|error`), `component`, `event` (verb-noun), and optional `data`.
