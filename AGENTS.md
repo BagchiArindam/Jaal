@@ -35,7 +35,7 @@ server/             Flask app on :7773
   server.py, analyzer.py, ai_provider.py, html_cleaner.py,
   pattern_discovery.py, cache.py, scrape_runs.py, config.py,
   logger.py, requirements.txt
-build/              build-extension.mjs, build-userscript.mjs
+build/              dev-sync.mjs, build-extension.mjs, build-userscript.mjs
 .claude/commands/   slash commands (discover-patterns.md)
 test/test-pages/    local fixtures (products, tables, paginated)
 ```
@@ -62,6 +62,16 @@ Legacy `SORTSIGHT_AI_PROVIDER` is read as a fallback during the deprecation wind
 - `POST /scrape-runs/{id}/checkpoint` — persist rows + checkpoint
 - `POST /scrape-runs/{id}/complete` — finalize run
 - `GET  /scrape-runs/latest` — most recent run
+
+## Dev workflow
+
+`shared/` is the single source of truth for common JS. Chrome's `scripting.executeScript` resolves file paths relative to the manifest root, so the extension can't load files outside `extension/`. Workaround: `build/dev-sync.mjs` copies `shared/*.js` into `extension/shared/` and `userscript/shared/` on demand.
+
+```bash
+node build/dev-sync.mjs     # run once after clone, and after any edit to shared/
+```
+
+The synced copies live under `.gitignore` — never edit them by hand; always edit the originals in `shared/` and rerun the sync. Phase C-8 will replace this with proper concatenating builds (`build-extension.mjs`, `build-userscript.mjs`).
 
 ## Conventions
 

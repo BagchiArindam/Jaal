@@ -20,6 +20,9 @@ Both share `shared/` core logic and talk to a local Flask server in `server/` on
 # server
 cd server && pip install -r requirements.txt && python server.py
 
+# sync shared/ into extension/ and userscript/ (required before loading unpacked)
+node build/dev-sync.mjs
+
 # extension (unpacked load)
 #   Chrome:  chrome://extensions → Load unpacked → pick extension/ (MV3)
 #   Firefox: about:debugging → Load Temporary Add-on → pick extension/manifest.v2.json

@@ -1,0 +1,16 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128">
+  <defs>
+    <linearGradient id="g" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#cba6f7"/>
+      <stop offset="1" stop-color="#89dceb"/>
+    </linearGradient>
+  </defs>
+  <rect width="128" height="128" rx="24" fill="#1e1e2e"/>
+  <g stroke="url(#g)" stroke-width="2" fill="none" opacity="0.55">
+    <path d="M16 32 L112 32 M16 64 L112 64 M16 96 L112 96"/>
+    <path d="M32 16 L32 112 M64 16 L64 112 M96 16 L96 112"/>
+    <path d="M16 16 L112 112 M112 16 L16 112"/>
+  </g>
+  <text x="64" y="88" font-family="'Cascadia Code','Fira Code','Consolas',monospace"
+        font-size="72" font-weight="700" fill="url(#g)" text-anchor="middle">J</text>
+</svg>
