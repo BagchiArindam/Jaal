@@ -1,15 +1,14 @@
 /**
  * Jaal background (MV3 service worker / MV2 background script).
  *
- * Current surface (C-5 skeleton):
- *   - Context menu: "Jaal: Inspect skeleton"
- *   - Injects shared/logger.js + shared/skeleton.js + ui/skeleton-overlay.js
- *     + content/content-main.js, then dispatches {type: "jaal-activate-skeleton"}.
- *   - Message relay for /health (used by future popup / debugging).
+ * Context menus:
+ *   jaal-inspect-skeleton  → injects skeleton inspector overlay
+ *   jaal-net-recorder      → injects net recorder overlay
+ *                            (net-hooks are installed declaratively at document-start;
+ *                             this menu item just surfaces the UI panel)
  *
- * Remaining endpoints (/analyze, /analyze-pagination, /cache/*, /scrape-runs/*,
- * /discover-patterns) are wired in as the picker, toolbar, and discovery UI
- * land in later phases.
+ * Message relay:
+ *   jaal-health → GET /health, response forwarded to sender.
  */
 /* global browser, chrome */
 
@@ -17,25 +16,31 @@ const B = typeof browser !== "undefined" ? browser : chrome;
 const SERVER_URL = "http://127.0.0.1:7773";
 const LOG_TAG = "[Jaal bg]";
 
-// ─── Context menu ───────────────────────────────────────────────────────────
+// ─── Context menus ──────────────────────────────────────────────────────────
 
 function registerContextMenus() {
-  // MV3 service workers can run before onInstalled; guard against duplicate id.
-  const create = (def) => {
+  const create = function (def) {
     try {
-      B.contextMenus.create(def, () => {
+      B.contextMenus.create(def, function () {
         if (B.runtime.lastError) {
-          // Ignore "duplicate id" on re-install / worker restart
+          // Ignore "duplicate id" on service-worker restart / re-install
         }
       });
     } catch (_) {}
   };
+
   create({
     id: "jaal-inspect-skeleton",
     title: "Jaal: Inspect skeleton",
     contexts: ["page", "frame", "link", "image", "selection"],
   });
-  console.log(LOG_TAG, "context menu registered");
+  create({
+    id: "jaal-net-recorder",
+    title: "Jaal: Net recorder",
+    contexts: ["page", "frame", "link", "image", "selection"],
+  });
+
+  console.log(LOG_TAG, "context menus registered");
 }
 
 // MV3: rebuild on install/update. MV2: run at load.
@@ -44,18 +49,18 @@ if (B.runtime && B.runtime.onInstalled) {
 }
 registerContextMenus();
 
-B.contextMenus.onClicked.addListener((info, tab) => {
+B.contextMenus.onClicked.addListener(function (info, tab) {
   if (!tab || typeof tab.id !== "number") return;
   if (info.menuItemId === "jaal-inspect-skeleton") {
     injectSkeletonInspector(tab.id);
+  } else if (info.menuItemId === "jaal-net-recorder") {
+    injectNetRecorder(tab.id);
   }
 });
 
-// ─── Script injection ───────────────────────────────────────────────────────
+// ─── Skeleton inspector injection ───────────────────────────────────────────
 
-// Paths are resolved relative to the extension root (where manifest.json lives).
-// `shared/` here is the synced copy that build/dev-sync.mjs (and eventually
-// build/build-extension.mjs) copies in from the repo's top-level shared/.
+// Paths relative to extension root. shared/ is the dev-sync copy of repo/shared/.
 const SKELETON_FILES = [
   "shared/logger.js",
   "shared/skeleton.js",
@@ -64,24 +69,55 @@ const SKELETON_FILES = [
 ];
 
 function injectSkeletonInspector(tabId) {
-  console.log(LOG_TAG, "injecting skeleton inspector into tab", tabId);
+  console.log(LOG_TAG, "injecting skeleton inspector", tabId);
+  _injectFiles(tabId, SKELETON_FILES, "jaal-activate-skeleton");
+}
+
+// ─── Net recorder injection ──────────────────────────────────────────────────
+//
+// net-recorder-main.js runs in MAIN world via declarative content_scripts
+// (MV3) or net-recorder-injector.js <script> tag (MV2), both at document_start.
+// We only need to inject the UI overlay (isolated world).
+
+const NET_RECORDER_UI_FILES = [
+  "shared/logger.js",
+  "shared/net-replayer.js",
+  "ui/net-recorder-overlay.js",
+  "content/content-main.js",
+];
+
+function injectNetRecorder(tabId) {
+  console.log(LOG_TAG, "injecting net recorder UI", tabId);
+  _injectFiles(tabId, NET_RECORDER_UI_FILES, "jaal-activate-net-recorder");
+}
+
+// ─── Shared injection helper ─────────────────────────────────────────────────
+
+function _injectFiles(tabId, files, activateMsg) {
   if (B.scripting && B.scripting.executeScript) {
-    // MV3 path
+    // MV3 path — isolated world (default; no `world` key means "ISOLATED")
     B.scripting
-      .executeScript({ target: { tabId }, files: SKELETON_FILES })
-      .then(() => {
-        B.tabs.sendMessage(tabId, { type: "jaal-activate-skeleton" });
+      .executeScript({ target: { tabId: tabId }, files: files })
+      .then(function () {
+        B.tabs.sendMessage(tabId, { type: activateMsg });
       })
-      .catch((err) => console.error(LOG_TAG, "MV3 injection failed:", err));
+      .catch(function (err) {
+        console.error(LOG_TAG, "MV3 injection failed:", err);
+      });
   } else if (B.tabs && B.tabs.executeScript) {
     // MV2 path — serialize injections
-    const chain = SKELETON_FILES.reduce(
-      (p, f) => p.then(() => B.tabs.executeScript(tabId, { file: f })),
-      Promise.resolve()
-    );
+    const chain = files.reduce(function (p, f) {
+      return p.then(function () {
+        return B.tabs.executeScript(tabId, { file: f });
+      });
+    }, Promise.resolve());
     chain
-      .then(() => B.tabs.sendMessage(tabId, { type: "jaal-activate-skeleton" }))
-      .catch((err) => console.error(LOG_TAG, "MV2 injection failed:", err));
+      .then(function () {
+        B.tabs.sendMessage(tabId, { type: activateMsg });
+      })
+      .catch(function (err) {
+        console.error(LOG_TAG, "MV2 injection failed:", err);
+      });
   } else {
     console.error(LOG_TAG, "no executeScript API available");
   }
@@ -89,18 +125,17 @@ function injectSkeletonInspector(tabId) {
 
 // ─── Server message relay ──────────────────────────────────────────────────
 
-B.runtime.onMessage.addListener((msg, sender, sendResponse) => {
+B.runtime.onMessage.addListener(function (msg, sender, sendResponse) {
   if (!msg || typeof msg.type !== "string") return false;
 
   if (msg.type === "jaal-health") {
-    fetch(`${SERVER_URL}/health`)
-      .then((r) => r.json())
-      .then((data) => sendResponse({ ok: true, data }))
-      .catch((err) => sendResponse({ ok: false, error: String(err) }));
+    fetch(SERVER_URL + "/health")
+      .then(function (r) { return r.json(); })
+      .then(function (data) { sendResponse({ ok: true, data: data }); })
+      .catch(function (err) { sendResponse({ ok: false, error: String(err) }); });
     return true; // async response
   }
 
-  // Future relays will land here in C-5b onward.
   return false;
 });
 
