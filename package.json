@@ -1,0 +1,15 @@
+{
+  "name": "jaal",
+  "version": "0.1.0",
+  "description": "Web-inspection and reverse-DOM toolkit",
+  "type": "module",
+  "scripts": {
+    "dev-sync":          "node build/dev-sync.mjs",
+    "build:extension":   "node build/build-extension.mjs",
+    "build:userscript":  "node build/build-userscript.mjs",
+    "build":             "node build/build-extension.mjs && node build/build-userscript.mjs"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}
