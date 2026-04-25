@@ -232,14 +232,14 @@
   // ─── CustomEvent bridge ──────────────────────────────────────────────────
 
   function sendCmd(cmd, extra) {
-    window.dispatchEvent(new CustomEvent("jaal:recorder:cmd", {
-      detail: Object.assign({ cmd: cmd }, extra || {})
-    }));
+    // Use postMessage for cross-world IPC (works in both Chrome MV3 and Firefox MV2)
+    window.postMessage(Object.assign({ source: "jaal-overlay", cmd: cmd }, extra || {}), "*");
   }
 
-  window.addEventListener("jaal:recorder:evt", function (evt) {
-    if (!evt || !evt.detail) return;
-    const e = evt.detail;
+  window.addEventListener("message", function (evt) {
+    // Only process messages from the MAIN world's net-recorder-main.js
+    if (!evt || !evt.data || evt.data.source !== "jaal-main") return;
+    const e = evt.data;
 
     if (e.event === "ready") {
       const count = e.count || 0;

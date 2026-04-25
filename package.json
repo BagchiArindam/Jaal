@@ -8,7 +8,12 @@
     "build:extension":   "node build/build-extension.mjs",
     "build:userscript":  "node build/build-userscript.mjs",
     "build:firefox":     "node build/dev-sync.mjs && node build/build-firefox.mjs",
+    "build:firefox:xpi": "web-ext build --source-dir dist-firefox --artifacts-dir . --overwrite-dest",
+    "watch:firefox":     "node build/watch-firefox.mjs",
     "build":             "node build/build-extension.mjs && node build/build-userscript.mjs"
+  },
+  "devDependencies": {
+    "web-ext": "^8.0.0"
   },
   "engines": {
     "node": ">=18"

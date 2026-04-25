@@ -17,19 +17,23 @@
   "use strict";
 
   if (window.__jaalContentMainLoaded) {
-    console.log("[Jaal content-main] already loaded — skipping re-init");
-    return;
+    console.log("[Jaal content-main] already loaded — re-registering message listener");
+    // Don't skip; re-register the listener in case a new UI was injected
+  } else {
+    window.__jaalContentMainLoaded = true;
   }
-  window.__jaalContentMainLoaded = true;
 
   const Jaal = (window.Jaal = window.Jaal || {});
   const log  = Jaal.makeLogger ? Jaal.makeLogger("content-main") : console;
   const B    = typeof browser !== "undefined" ? browser : chrome;
 
+  console.log("[Jaal content-main] initializing, Jaal namespace ready");
+
   // --- Message routing ---
 
   B.runtime.onMessage.addListener(function (msg) {
     if (!msg || typeof msg.type !== "string") return;
+    console.log("[Jaal content-main] message received:", msg.type);
 
     if (msg.type === "jaal-activate-skeleton") {
       if (Jaal.skeletonOverlay && Jaal.skeletonOverlay.show) {
@@ -60,13 +64,18 @@
   // --- Picker orchestration ---
 
   async function startPicking() {
+    console.log("[Jaal content-main] startPicking called, Jaal.picker =", !!Jaal.picker);
     if (!Jaal.picker) {
       console.error("[Jaal content-main] picker not loaded");
       return;
     }
-    if (Jaal.picker.isActive()) return;
+    if (Jaal.picker.isActive()) {
+      console.log("[Jaal content-main] picker already active");
+      return;
+    }
 
     try {
+      console.log("[Jaal content-main] activating picker...");
       const { element: containerEl, hint: hintEl } = await Jaal.picker.activate({
         tooltipHeader: "Select the list container",
         prompt: "Pick the WRAPPER element containing all repeating items (e.g. a <ul> or grid <div>). Scroll ↕ to walk up the tree.",

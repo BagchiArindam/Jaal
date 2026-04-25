@@ -62,8 +62,24 @@ fs.copyFileSync(v2Path, path.join(OUT_DIR, "manifest.json"));
 console.log(`[build-firefox] copied ${copied} entries + manifest.v2.json → manifest.json`);
 console.log(`[build-firefox] wrote ${path.relative(ROOT, OUT_DIR)}/`);
 console.log("");
-console.log("Load in Firefox:");
-console.log("  1. about:debugging");
-console.log("  2. This Firefox");
-console.log("  3. Load Temporary Add-on…");
-console.log(`  4. Select ${OUT_DIR.replace(/\\/g, "/")}/manifest.json`);
+
+// Build .xpi using web-ext
+import { execSync } from "child_process";
+try {
+  console.log("[build-firefox] building .xpi with web-ext...");
+  execSync(`npx web-ext build --source-dir "${OUT_DIR}" --artifacts-dir "${ROOT}" --overwrite-dest`, {
+    stdio: "inherit",
+    cwd: ROOT
+  });
+  console.log(`[build-firefox] ✓ wrote ${path.relative(ROOT, ROOT)}/dist-firefox.xpi`);
+} catch (err) {
+  console.warn("[build-firefox] web-ext build failed (xpi production skipped)");
+  console.warn("[build-firefox] make sure web-ext is installed: npm install --save-dev web-ext");
+  console.warn("[build-firefox] error:", err.message);
+}
+
+console.log("");
+console.log("Install in Firefox Developer Edition:");
+console.log("  1. about:config → xpinstall.signatures.required = false");
+console.log("  2. about:addons → gear icon → Install Add-on from File");
+console.log(`  3. Select ${path.relative(ROOT, ROOT).replace(/\\/g, "/")}/dist-firefox.xpi`);

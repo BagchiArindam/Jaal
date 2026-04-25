@@ -16,6 +16,54 @@ const B = typeof browser !== "undefined" ? browser : chrome;
 const SERVER_URL = "http://127.0.0.1:7773";
 const LOG_TAG = "[Jaal bg]";
 
+// ─── Data migration (sort-sight → jaal) ──────────────────────────────────────
+
+function migrateFromSortSight() {
+  B.storage.local.get("jaal_migration_done", function (result) {
+    if (result.jaal_migration_done) {
+      console.log(LOG_TAG, "migration already completed");
+      return;
+    }
+
+    B.storage.local.get("sortsight_finalized", function (result) {
+      const oldData = result.sortsight_finalized || {};
+      const numOldEntries = Object.keys(oldData).length;
+
+      if (numOldEntries === 0) {
+        B.storage.local.set({ jaal_migration_done: true });
+        console.log(LOG_TAG, "no sort-sight data to migrate");
+        return;
+      }
+
+      B.storage.local.get("jaal_finalized", function (result) {
+        const newData = result.jaal_finalized || {};
+        let numMigrated = 0;
+
+        // Merge: copy any missing entries from old data to new
+        for (const key in oldData) {
+          if (!(key in newData)) {
+            newData[key] = oldData[key];
+            numMigrated++;
+          }
+        }
+
+        B.storage.local.set({
+          jaal_finalized: newData,
+          jaal_migration_done: true
+        });
+
+        console.log(LOG_TAG, "migrated " + numMigrated + " entries from sort-sight to jaal");
+      });
+    });
+  });
+}
+
+// Run migration on install/update
+if (B.runtime && B.runtime.onInstalled) {
+  B.runtime.onInstalled.addListener(migrateFromSortSight);
+}
+migrateFromSortSight();
+
 // ─── Context menus ──────────────────────────────────────────────────────────
 
 function registerContextMenus() {
@@ -34,16 +82,6 @@ function registerContextMenus() {
     title: "Jaal: Pick list",
     contexts: ["page", "frame", "link", "image", "selection"],
   });
-  create({
-    id: "jaal-inspect-skeleton",
-    title: "Jaal: Inspect skeleton",
-    contexts: ["page", "frame", "link", "image", "selection"],
-  });
-  create({
-    id: "jaal-net-recorder",
-    title: "Jaal: Net recorder",
-    contexts: ["page", "frame", "link", "image", "selection"],
-  });
 
   console.log(LOG_TAG, "context menus registered");
 }
@@ -58,10 +96,6 @@ B.contextMenus.onClicked.addListener(function (info, tab) {
   if (!tab || typeof tab.id !== "number") return;
   if (info.menuItemId === "jaal-pick") {
     injectPicker(tab.id);
-  } else if (info.menuItemId === "jaal-inspect-skeleton") {
-    injectSkeletonInspector(tab.id);
-  } else if (info.menuItemId === "jaal-net-recorder") {
-    injectNetRecorder(tab.id);
   }
 });
 
@@ -214,6 +248,22 @@ B.runtime.onMessage.addListener(function (msg, sender, sendResponse) {
     // (e.g. cross-context scenario). Bounce back to the sending tab.
     if (sender && sender.tab && sender.tab.id) {
       B.tabs.sendMessage(sender.tab.id, { type: "jaal-activate-picker" });
+    }
+    return false;
+  }
+
+  if (msg.type === "jaal-inject-skeleton") {
+    // Popup button clicked for skeleton inspector
+    if (sender && sender.tab && sender.tab.id) {
+      injectSkeletonInspector(sender.tab.id);
+    }
+    return false;
+  }
+
+  if (msg.type === "jaal-inject-net-recorder") {
+    // Popup button clicked for net recorder
+    if (sender && sender.tab && sender.tab.id) {
+      injectNetRecorder(sender.tab.id);
     }
     return false;
   }

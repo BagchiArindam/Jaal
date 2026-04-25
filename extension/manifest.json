@@ -17,7 +17,8 @@
     "service_worker": "background.js"
   },
   "action": {
-    "default_title": "Jaal",
+    "default_title": "Jaal tools",
+    "default_popup": "popup/popup.html",
     "default_icon": {
       "16": "icons/icon-16.svg",
       "48": "icons/icon-48.svg",

@@ -182,4 +182,6 @@
   };
   console.log("[Jaal] skeleton loaded");
 
-})(typeof globalThis !== "undefined" ? globalThis : this);
+})(typeof globalThis !== "undefined" ? globalThis : (function() {
+  try { return this; } catch(_) { return window; }
+})());

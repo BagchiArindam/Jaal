@@ -44,14 +44,14 @@
   }
 
   function dispatch(eventName, detail) {
-    window.dispatchEvent(new CustomEvent("jaal:recorder:evt", {
-      detail: Object.assign({ event: eventName }, detail || {})
-    }));
+    // Use postMessage for cross-world IPC (works in both Chrome MV3 and Firefox MV2)
+    window.postMessage(Object.assign({ source: "jaal-main", event: eventName }, detail || {}), "*");
   }
 
-  window.addEventListener("jaal:recorder:cmd", function (evt) {
-    if (!evt || !evt.detail) return;
-    const cmd = evt.detail.cmd;
+  window.addEventListener("message", function (evt) {
+    // Only process messages from the isolated world's net-recorder-overlay.js
+    if (!evt || !evt.data || evt.data.source !== "jaal-overlay") return;
+    const cmd = evt.data.cmd;
 
     if (cmd === "init") {
       ensureHooks();
