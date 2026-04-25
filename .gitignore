@@ -37,6 +37,7 @@ server/*.log
 # Editors / OS
 .vscode/
 .idea/
+.vs/
 .DS_Store
 Thumbs.db
 *.swp
