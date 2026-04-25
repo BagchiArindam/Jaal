@@ -124,7 +124,7 @@ function _injectFiles(tabId, files, activateMsg) {
     B.scripting
       .executeScript({ target: { tabId: tabId }, files: files })
       .then(function () {
-        B.tabs.sendMessage(tabId, { type: activateMsg });
+        if (activateMsg) B.tabs.sendMessage(tabId, { type: activateMsg });
       })
       .catch(function (err) {
         console.error(LOG_TAG, "MV3 injection failed:", err);
@@ -138,7 +138,7 @@ function _injectFiles(tabId, files, activateMsg) {
     }, Promise.resolve());
     chain
       .then(function () {
-        B.tabs.sendMessage(tabId, { type: activateMsg });
+        if (activateMsg) B.tabs.sendMessage(tabId, { type: activateMsg });
       })
       .catch(function (err) {
         console.error(LOG_TAG, "MV2 injection failed:", err);
@@ -147,6 +147,42 @@ function _injectFiles(tabId, files, activateMsg) {
     console.error(LOG_TAG, "no executeScript API available");
   }
 }
+
+// ─── Auto-inject: check finalized configs on tab load ───────────────────────
+
+B.tabs.onUpdated.addListener(function (tabId, changeInfo, tab) {
+  if (changeInfo.status !== "complete" || !tab.url || tab.url.startsWith("chrome")) return;
+
+  B.storage.local.get("jaal_finalized", function (result) {
+    const store = (result && result["jaal_finalized"]) || {};
+    const keys  = Object.keys(store);
+    if (keys.length === 0) return;
+
+    let url;
+    try { url = new URL(tab.url); } catch (_) { return; }
+    const tabKey = url.hostname + url.pathname.replace(/\/+$/, "");
+
+    // Exact key match first, then check stored urlPattern prefix
+    let config = store[tabKey];
+    if (!config) {
+      for (const k of keys) {
+        const c = store[k];
+        if (c.urlPattern && tab.url.startsWith(c.urlPattern.split("?")[0])) {
+          config = c;
+          break;
+        }
+      }
+    }
+    if (!config) return;
+
+    console.log(LOG_TAG, "auto-inject for", tab.url);
+    _injectFiles(tabId, PICKER_FILES, null);
+    // After inject, send auto-activate with the saved config
+    setTimeout(function () {
+      B.tabs.sendMessage(tabId, { type: "jaal-auto-activate", config: config });
+    }, 500);
+  });
+});
 
 // ─── Server message relay ──────────────────────────────────────────────────
 

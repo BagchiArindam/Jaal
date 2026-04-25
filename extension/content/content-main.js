@@ -50,6 +50,10 @@
     } else if (msg.type === "jaal-activate-picker" || msg.type === "jaal-start-pick") {
       log.info("activate_picker", { phase: "mutate", src: msg.type });
       startPicking();
+
+    } else if (msg.type === "jaal-auto-activate") {
+      log.info("auto_activate", { phase: "mutate", url: msg.config && msg.config.urlPattern });
+      autoActivate(msg.config);
     }
   });
 
@@ -211,6 +215,59 @@
     return new Promise(function (resolve) {
       B.runtime.sendMessage(message, resolve);
     });
+  }
+
+  // --- Auto-activate from finalized config ---
+
+  function _tryAutoActivate(config) {
+    const containerEl = document.querySelector(config.containerSelector);
+    if (!containerEl) return false;
+    const safeItemSel = config.itemSelector.trimStart().startsWith(">")
+      ? ":scope " + config.itemSelector
+      : config.itemSelector;
+    const items = containerEl.querySelectorAll(safeItemSel);
+    if (items.length === 0) return false;
+
+    if (Jaal.toolbar) {
+      Jaal.toolbar.create(
+        { columns: config.columns, itemSelector: config.itemSelector },
+        containerEl,
+        config.itemSelector,
+        items.length,
+        { containerSelector: config.containerSelector, pagination: config.pagination || null, finalized: true }
+      );
+      Jaal.toolbar.onClose(function () {
+        if (Jaal.sorter) Jaal.sorter.clearOriginalOrder();
+      });
+    }
+    log.info("auto_activated", { phase: "init", items: items.length, cols: config.columns.length });
+    return true;
+  }
+
+  function autoActivate(config) {
+    if (!config || !config.containerSelector) return;
+    if (_tryAutoActivate(config)) return;
+
+    // SPA: content not in DOM yet — watch for mutations up to 30 s
+    let done = false;
+    const observer = new MutationObserver(function () {
+      if (done) return;
+      if (_tryAutoActivate(config)) { done = true; observer.disconnect(); clearInterval(poll); clearTimeout(timeout); }
+    });
+    observer.observe(document.body, { childList: true, subtree: true });
+
+    const poll = setInterval(function () {
+      if (done) return;
+      if (_tryAutoActivate(config)) { done = true; observer.disconnect(); clearInterval(poll); clearTimeout(timeout); }
+    }, 2000);
+
+    const timeout = setTimeout(function () {
+      if (!done) {
+        observer.disconnect();
+        clearInterval(poll);
+        log.warn("auto_activate_timeout", { phase: "init", containerSel: config.containerSelector });
+      }
+    }, 30000);
   }
 
   // Expose for toolbar repick button
