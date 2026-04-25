@@ -297,7 +297,11 @@
 
     if (repickBtn) repickBtn.addEventListener("click", function () {
       destroy();
-      if (B) B.runtime.sendMessage({ type: "jaal-start-pick" });
+      if (global.Jaal && typeof global.Jaal.startPicking === "function") {
+        global.Jaal.startPicking();
+      } else if (B) {
+        B.runtime.sendMessage({ type: "jaal-start-pick" });
+      }
     });
 
     // Detect pagination: let user pick the pagination element

@@ -30,6 +30,11 @@ function registerContextMenus() {
   };
 
   create({
+    id: "jaal-pick",
+    title: "Jaal: Pick list",
+    contexts: ["page", "frame", "link", "image", "selection"],
+  });
+  create({
     id: "jaal-inspect-skeleton",
     title: "Jaal: Inspect skeleton",
     contexts: ["page", "frame", "link", "image", "selection"],
@@ -51,12 +56,32 @@ registerContextMenus();
 
 B.contextMenus.onClicked.addListener(function (info, tab) {
   if (!tab || typeof tab.id !== "number") return;
-  if (info.menuItemId === "jaal-inspect-skeleton") {
+  if (info.menuItemId === "jaal-pick") {
+    injectPicker(tab.id);
+  } else if (info.menuItemId === "jaal-inspect-skeleton") {
     injectSkeletonInspector(tab.id);
   } else if (info.menuItemId === "jaal-net-recorder") {
     injectNetRecorder(tab.id);
   }
 });
+
+// ─── Picker / toolbar injection ─────────────────────────────────────────────
+
+// All shared libs + picker + sorter + paginator + toolbar, then content-main as router.
+const PICKER_FILES = [
+  "shared/logger.js",
+  "shared/html-extractor.js",
+  "shared/sorter.js",
+  "shared/paginator.js",
+  "content/picker.js",
+  "ui/toolbar.js",
+  "content/content-main.js",
+];
+
+function injectPicker(tabId) {
+  console.log(LOG_TAG, "injecting picker", tabId);
+  _injectFiles(tabId, PICKER_FILES, "jaal-activate-picker");
+}
 
 // ─── Skeleton inspector injection ───────────────────────────────────────────
 
@@ -133,7 +158,28 @@ B.runtime.onMessage.addListener(function (msg, sender, sendResponse) {
       .then(function (r) { return r.json(); })
       .then(function (data) { sendResponse({ ok: true, data: data }); })
       .catch(function (err) { sendResponse({ ok: false, error: String(err) }); });
-    return true; // async response
+    return true;
+  }
+
+  if (msg.type === "jaal-analyze") {
+    fetch(SERVER_URL + "/analyze", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(msg.payload || {}),
+    })
+      .then(function (r) { return r.json(); })
+      .then(function (data) { sendResponse({ ok: true, data: data }); })
+      .catch(function (err) { sendResponse({ ok: false, error: String(err) }); });
+    return true;
+  }
+
+  if (msg.type === "jaal-start-pick") {
+    // Relay from a content script that can't call startPicking directly
+    // (e.g. cross-context scenario). Bounce back to the sending tab.
+    if (sender && sender.tab && sender.tab.id) {
+      B.tabs.sendMessage(sender.tab.id, { type: "jaal-activate-picker" });
+    }
+    return false;
   }
 
   return false;
