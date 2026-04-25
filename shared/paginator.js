@@ -29,16 +29,12 @@
  *   FORM_PAGES      — fetch-based; next URL derived from <form> submit
  *   LINK_PAGES      — fetch-based; next URL from <a rel="next"> or similar
  *
- * Deferred (not yet implemented):
- *   INFINITE_SCROLL — scroll-based accumulation
- *   resumeState     — checkpoint/resume for fetch-based traversal
- *   rate-limit backoff / exponential retry
- *
  * options for startFlatten():
  *   delayMs           — inter-page delay (default 1500 ms)
  *   containerSelector — CSS selector to find the item container in fetched pages
  *   skipRebuild       — if true, don't inject clones into the live DOM
  *   initialSeenHashes — string[] of already-seen hash fingerprints for dedup
+ *   resumeState       — { currentPage, nextUrl, totalRows, currentDelayMs } for checkpoint resume
  */
 (function (global) {
   "use strict";
@@ -530,46 +526,95 @@
     });
   }
 
-  // --- Traversal: fetch-based (FORM_PAGES / LINK_PAGES) ---
+  // --- Traversal: fetch-based (FORM_PAGES / LINK_PAGES) with rate-limit backoff + resumeState ---
 
-  async function _traverseFetchBased(container, itemSelector, config, delayMs, containerSelector, skipRebuild) {
-    let currentPage = 0;
-    let nextUrl     = config.initialNextUrl;
-    let baseHref    = window.location.href;
-    let totalItems  = 0;
-    let emptyStreak = 0;
+  const RATE_LIMIT_KEYWORDS = ["rate limit", "too many requests", "please wait", "access denied", "captcha", "blocked", "try again later"];
+  const MAX_RETRIES = 3;
 
-    // Capture page 1 from live DOM
-    const page1Items  = safeQSA(container, itemSelector);
-    const page1Clones = uniqueClones(page1Items);
-    if (page1Clones.length > 0) {
-      _collectedPages.push({ pageNum: 1, items: page1Clones });
-      totalItems = page1Clones.length;
+  function _isRateLimitBody(html) {
+    const lower = html.substring(0, 2000).toLowerCase();
+    return RATE_LIMIT_KEYWORDS.some(function (kw) { return lower.includes(kw); });
+  }
+
+  async function _traverseFetchBased(container, itemSelector, config, delayMs, containerSelector, skipRebuild, resumeState) {
+    let currentPage      = 0;
+    let nextUrl          = config.initialNextUrl;
+    let baseHref         = window.location.href;
+    let totalItems       = 0;
+    let emptyStreak      = 0;
+    let consecutiveErr   = 0;
+    let currentDelay     = delayMs;
+
+    if (resumeState && resumeState.nextUrl) {
+      currentPage  = parseInt(resumeState.currentPage  || 0);
+      nextUrl      = resumeState.nextUrl;
+      totalItems   = parseInt(resumeState.totalRows    || 0);
+      currentDelay = Math.max(parseInt(resumeState.currentDelayMs || 0), delayMs);
+      _fireProgress(currentPage, config.lastVisiblePage, totalItems);
+      log.info("flatten_resume", { phase: "mutate", page: currentPage, url: nextUrl });
+    } else {
+      // Capture page 1 from live DOM
+      const page1Items  = safeQSA(container, itemSelector);
+      const page1Clones = uniqueClones(page1Items);
+      if (page1Clones.length > 0) {
+        _collectedPages.push({ pageNum: 1, items: page1Clones });
+        totalItems = page1Clones.length;
+      }
+      currentPage = 1;
+      _fireProgress(currentPage, config.lastVisiblePage, totalItems);
+      await _firePage(currentPage, page1Clones, { totalItems: totalItems, nextUrl: nextUrl });
+      log.info("flatten_page1", { phase: "mutate", type: config.type, items: page1Items.length, nextUrl: nextUrl });
     }
-    currentPage = 1;
-    _fireProgress(currentPage, config.lastVisiblePage, totalItems);
-    await _firePage(currentPage, page1Clones, { totalItems: totalItems, nextUrl: nextUrl });
-    log.info("flatten_page1", { phase: "mutate", type: config.type, items: page1Items.length, nextUrl: nextUrl });
 
     while (currentPage < MAX_PAGES && nextUrl) {
       if (_cancelRequested) { _state = "CANCELLED"; return; }
 
-      log.debug("flatten_fetch", { phase: "mutate", page: currentPage + 1, url: nextUrl });
+      log.debug("flatten_fetch", { phase: "mutate", page: currentPage + 1, url: nextUrl, delay: currentDelay });
 
-      let html, respUrl;
+      let html, respUrl, rateLimited = false;
       try {
         const resp = await fetch(nextUrl, { credentials: "same-origin" });
-        if (!resp.ok) throw new Error("HTTP " + resp.status + " fetching " + nextUrl);
+        if (resp.status === 429) {
+          rateLimited = true;
+        } else if (!resp.ok) {
+          throw new Error("HTTP " + resp.status + " fetching " + nextUrl);
+        }
         html    = await resp.text();
         respUrl = resp.url || nextUrl;
+        if (!rateLimited && _isRateLimitBody(html)) rateLimited = true;
       } catch (e) {
-        _state = "ERROR";
-        log.error("flatten_fetch_error", { phase: "error", url: nextUrl, err: e.message });
-        if (_errorCb) _errorCb(e);
-        return;
+        consecutiveErr++;
+        if (consecutiveErr > MAX_RETRIES) {
+          _state = "ERROR";
+          log.error("flatten_fetch_error", { phase: "error", url: nextUrl, err: e.message });
+          if (_errorCb) _errorCb(new Error("Fetch failed after " + MAX_RETRIES + " retries: " + e.message));
+          return;
+        }
+        currentDelay = Math.min(currentDelay * 2, 30000);
+        log.warn("flatten_fetch_retry", { phase: "mutate", attempt: consecutiveErr, delay: currentDelay, err: e.message });
+        _fireProgress(currentPage, config.lastVisiblePage, totalItems);
+        await delay(currentDelay);
+        continue;
       }
 
+      if (rateLimited) {
+        consecutiveErr++;
+        if (consecutiveErr > MAX_RETRIES) {
+          _state = "ERROR";
+          if (_errorCb) _errorCb(new Error("Rate limited after " + MAX_RETRIES + " retries"));
+          return;
+        }
+        currentDelay = Math.min(currentDelay * 2, 30000);
+        log.warn("flatten_rate_limited", { phase: "mutate", attempt: consecutiveErr, delay: currentDelay });
+        _fireProgress(currentPage, config.lastVisiblePage, totalItems);
+        await delay(currentDelay);
+        continue;
+      }
+
+      consecutiveErr = 0;
+      currentDelay   = Math.max(Math.round(currentDelay / 1.5), delayMs);
       baseHref = respUrl;
+
       const doc = new DOMParser().parseFromString(html, "text/html");
 
       // Locate item container in fetched page
@@ -614,16 +659,97 @@
       totalItems += newClones.length;
       nextUrl = findNextPageUrl(doc, config, baseHref);
       _fireProgress(currentPage, config.lastVisiblePage, totalItems);
-      await _firePage(currentPage, newClones, { totalItems: totalItems, nextUrl: nextUrl });
+      await _firePage(currentPage, newClones, {
+        totalItems: totalItems, nextUrl: nextUrl,
+        resumeState: { currentPage: currentPage, nextUrl: nextUrl, totalRows: totalItems, currentDelayMs: currentDelay },
+      });
 
       if (_cancelRequested) { _state = "CANCELLED"; return; }
-      await delay(delayMs);
+      await delay(currentDelay);
     }
 
     _state = "COMPLETE";
     log.info("flatten_complete", { phase: "mutate", pages: currentPage, items: totalItems });
     if (_completeCb) _completeCb({
       totalPages: currentPage, totalItems: totalItems, seenHashes: Array.from(_seenHashes),
+    });
+  }
+
+  // --- Traversal: infinite scroll ---
+
+  async function _traverseInfiniteScroll(container, itemSelector, config, skipRebuild) {
+    return new Promise(function (resolve) {
+      let scrollEl = document.documentElement;
+      if (config.scrollContainerSelector) {
+        const found = document.querySelector(config.scrollContainerSelector);
+        if (found) { scrollEl = found; }
+        else { log.warn("flatten_scroll_container_missing", { phase: "mutate", sel: config.scrollContainerSelector }); }
+      }
+
+      const page1Items  = safeQSA(container, itemSelector);
+      const page1Clones = uniqueClones(page1Items);
+      let totalItems = 0;
+      let tick = 1;
+      if (page1Clones.length > 0) {
+        _collectedPages.push({ pageNum: 1, items: page1Clones });
+        totalItems = page1Clones.length;
+      }
+      log.info("flatten_scroll_start", { phase: "mutate", page1Items: page1Items.length });
+      _fireProgress(1, null, totalItems);
+
+      let lastScrollTop      = -1;
+      let confirmedBottom    = 0;
+      let noProgressTicks    = 0;
+
+      const intervalId = setInterval(async function () {
+        if (_cancelRequested) {
+          clearInterval(intervalId);
+          _state = "CANCELLED";
+          resolve();
+          return;
+        }
+
+        const newClones = uniqueClones(safeQSA(container, itemSelector));
+        if (newClones.length > 0) {
+          tick++;
+          _collectedPages.push({ pageNum: tick, items: newClones });
+          totalItems += newClones.length;
+          await _firePage(tick, newClones, { totalItems: totalItems, nextUrl: null });
+        }
+
+        const scrollTop    = scrollEl.scrollTop !== undefined ? scrollEl.scrollTop : (window.scrollY || 0);
+        const clientHeight = scrollEl.clientHeight || window.innerHeight;
+        const scrollHeight = scrollEl.scrollHeight || document.body.scrollHeight;
+
+        _fireProgress(tick, null, totalItems);
+
+        const atBottom = scrollTop + clientHeight >= scrollHeight - 120;
+        confirmedBottom = atBottom ? confirmedBottom + 1 : 0;
+        noProgressTicks = (scrollTop === lastScrollTop) ? noProgressTicks + 1 : 0;
+        lastScrollTop   = scrollTop;
+
+        if (confirmedBottom >= 2 || noProgressTicks >= 8) {
+          clearInterval(intervalId);
+          const finalClones = uniqueClones(safeQSA(container, itemSelector));
+          if (finalClones.length > 0) {
+            tick++;
+            _collectedPages.push({ pageNum: tick, items: finalClones });
+            totalItems += finalClones.length;
+          }
+          if (!skipRebuild) rebuildContainer(container, itemSelector);
+          _state = "COMPLETE";
+          log.info("flatten_scroll_complete", { phase: "mutate", ticks: tick, items: totalItems });
+          if (_completeCb) _completeCb({ totalPages: tick, totalItems: totalItems, seenHashes: Array.from(_seenHashes) });
+          resolve();
+          return;
+        }
+
+        if (scrollEl === document.documentElement || scrollEl === document.body) {
+          window.scrollBy({ top: window.innerHeight * 0.75, behavior: "smooth" });
+        } else {
+          scrollEl.scrollBy({ top: scrollEl.clientHeight * 0.75, behavior: "smooth" });
+        }
+      }, 700);
     });
   }
 
@@ -639,14 +765,17 @@
     const delayMs           = options.delayMs || DEFAULT_DELAY_MS;
     const containerSelector = options.containerSelector || null;
     const skipRebuild       = !!options.skipRebuild;
+    const resumeState       = options.resumeState || null;
     const initialSeenHashes = Array.isArray(options.initialSeenHashes) ? options.initialSeenHashes : [];
     _seenHashes = new Set(initialSeenHashes.map(String));
 
-    log.info("flatten_start", { phase: "mutate", type: config.type, delayMs: delayMs });
+    log.info("flatten_start", { phase: "mutate", type: config.type, delayMs: delayMs, resume: !!resumeState });
 
     try {
-      if (config.type === "FORM_PAGES" || config.type === "LINK_PAGES") {
-        await _traverseFetchBased(container, itemSelector, config, delayMs, containerSelector, skipRebuild);
+      if (config.type === "INFINITE_SCROLL") {
+        await _traverseInfiniteScroll(container, itemSelector, config, skipRebuild);
+      } else if (config.type === "FORM_PAGES" || config.type === "LINK_PAGES") {
+        await _traverseFetchBased(container, itemSelector, config, delayMs, containerSelector, skipRebuild, resumeState);
       } else {
         await _traverseClickBased(container, itemSelector, config, delayMs, skipRebuild);
       }
@@ -690,7 +819,6 @@
   function onComplete(cb) { _completeCb = cb; }
   function onError(cb)    { _errorCb = cb; }
 
-  // Stub config for INFINITE_SCROLL — traversal is deferred
   function buildInfiniteScrollConfig(scrollContainer) {
     return {
       type: "INFINITE_SCROLL",
