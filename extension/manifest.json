@@ -2,7 +2,7 @@
   "manifest_version": 3,
   "name": "Jaal",
   "version": "0.1.0",
-  "description": "Web-inspection and reverse-DOM toolkit \u00e2\u20ac\u201d skeleton inspector, list scraping, network recorder.",
+  "description": "Web-inspection and reverse-DOM toolkit \u2014 skeleton inspector, list scraping, network recorder.",
   "permissions": [
     "contextMenus",
     "activeTab",

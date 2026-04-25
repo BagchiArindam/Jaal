@@ -7,6 +7,7 @@
     "dev-sync":          "node build/dev-sync.mjs",
     "build:extension":   "node build/build-extension.mjs",
     "build:userscript":  "node build/build-userscript.mjs",
+    "build:firefox":     "node build/dev-sync.mjs && node build/build-firefox.mjs",
     "build":             "node build/build-extension.mjs && node build/build-userscript.mjs"
   },
   "engines": {
