@@ -155,6 +155,36 @@
 @keyframes spin { to { transform: rotate(360deg); } }
 .jaal-error { padding: 12px; color: #dc2626; font-size: 12px; text-align: center; cursor: text; user-select: text; }
 .jaal-field-highlight { outline: 2px solid #f59e0b !important; outline-offset: 1px !important; background-color: rgba(245,158,11,.12) !important; }
+.jaal-settings {
+  padding: 6px 10px; border-top: 1px solid #f0f0f0; background: #f9fafb;
+}
+.jaal-set-row {
+  display: flex; align-items: center; gap: 6px; padding: 3px 0;
+}
+.jaal-set-label {
+  font-size: 11px; color: #6b7280; min-width: 78px; flex-shrink: 0;
+}
+.jaal-set-value {
+  flex: 1; font-size: 11px; color: #374151;
+  font-family: "SFMono-Regular", Consolas, monospace;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  background: #fff; padding: 2px 6px; border-radius: 3px; border: 1px solid #e5e7eb;
+}
+.jaal-set-value.empty { color: #9ca3af; font-style: italic; }
+.jaal-search-value {
+  flex: 1; padding: 2px 6px; font-size: 12px;
+  border: 1px solid #d1d5db; border-radius: 4px; outline: none;
+  font-family: inherit; color: #1a1a2e; background: #fff;
+}
+.jaal-search-value:focus { border-color: #3b82f6; }
+.jaal-set-btn {
+  background: #e5e7eb; color: #374151; border: none;
+  padding: 2px 8px; border-radius: 4px; cursor: pointer;
+  font-size: 11px; font-family: inherit;
+}
+.jaal-set-btn:hover { background: #d1d5db; }
+.jaal-set-btn.danger { background: #fee2e2; color: #b91c1c; }
+.jaal-set-btn.danger:hover { background: #fecaca; }
 `;
 
   // Highlight stylesheet — added to <head> once, shared across all instances
@@ -214,6 +244,8 @@
     let _isFinalized     = !!(options.finalized);
     const _configId        = options.configId || null;
     const _label           = options.label || "Jaal";
+    let _searchInputSelector = options.searchInputSelector || null;
+    let _searchInputValue    = options.searchInputValue    || "";
 
     _filterValues = new Array(_columns.length).fill("");
     _nullStates   = new Array(_columns.length).fill("off");
@@ -569,8 +601,8 @@
               itemSelector: _itemSel,
               columns: _columns,
               pagination: _savedPagination || null,
-              searchInputSelector: (configs[idx] && configs[idx].searchInputSelector) || null,
-              searchInputValue:    (configs[idx] && configs[idx].searchInputValue)    || null,
+              searchInputSelector: _searchInputSelector || (configs[idx] && configs[idx].searchInputSelector) || null,
+              searchInputValue:    _searchInputValue    || (configs[idx] && configs[idx].searchInputValue)    || null,
               finalizedAt: now,
               createdAt: (configs[idx] && configs[idx].createdAt) || now,
             };
@@ -583,6 +615,118 @@
           B.storage.local.set({ jaal_configs: configs });
         });
       });
+    }
+
+    // ─── Settings panel (search-bar pick + saved value) ─────────────
+
+    // Update this instance's matching entry in jaal_configs (by composite key).
+    // No-op if no entry exists yet (Finalize will write it later).
+    function _updateConfigInStorage(patch) {
+      if (!B || !B.storage || !B.storage.local) return;
+      const domain      = window.location.hostname;
+      const pathPattern = window.location.pathname.replace(/\/+$/, "") || "/";
+      B.storage.local.get("jaal_configs", function (result) {
+        const configs = Array.isArray(result && result.jaal_configs) ? result.jaal_configs : [];
+        const idx = configs.findIndex(function (c) {
+          return c && c.domain === domain
+                  && c.pathPattern === pathPattern
+                  && c.parentSelector === _containerSel;
+        });
+        if (idx < 0) return;
+        configs[idx] = Object.assign({}, configs[idx], patch);
+        B.storage.local.set({ jaal_configs: configs });
+      });
+    }
+
+    function _setupSettings(toolbar) {
+      const toggleBtn = toolbar.querySelector(".jaal-settings-toggle");
+      const panel     = toolbar.querySelector(".jaal-settings");
+      const selEl     = toolbar.querySelector(".jaal-search-sel");
+      const pickBtn   = toolbar.querySelector(".jaal-search-pick");
+      const clearBtn  = toolbar.querySelector(".jaal-search-clear");
+      const valInput  = toolbar.querySelector(".jaal-search-value");
+
+      if (toggleBtn && panel) {
+        toggleBtn.addEventListener("click", function () {
+          const open = panel.style.display === "" || panel.style.display === "block";
+          panel.style.display = open ? "none" : "";
+          toggleBtn.classList.toggle("active", !open);
+        });
+      }
+
+      function _refreshSel() {
+        if (!selEl) return;
+        if (_searchInputSelector) {
+          selEl.textContent = _searchInputSelector;
+          selEl.title = _searchInputSelector;
+          selEl.classList.remove("empty");
+        } else {
+          selEl.textContent = "(not picked)";
+          selEl.title = "";
+          selEl.classList.add("empty");
+        }
+      }
+
+      if (pickBtn) {
+        pickBtn.addEventListener("click", async function () {
+          if (!ns.picker) {
+            log.warn && log.warn("search_pick_no_picker", { phase: "error" });
+            return;
+          }
+          pickBtn.disabled = true;
+          pickBtn.textContent = "…";
+          try {
+            const { element } = await ns.picker.activate({
+              tooltipHeader: "Click the SEARCH INPUT",
+              prompt: "Pick the <input> the site uses for searching this list. Scroll ↕ to walk up.",
+              highlightColor: "#7ec8e3",
+            });
+            // Build a CSS selector — prefer #id, then tag.class, then tag[type]
+            let sel = "";
+            if (element.id) {
+              sel = "#" + (function () { try { return CSS.escape(element.id); } catch (_) { return element.id; } })();
+            } else if (element.name) {
+              sel = (element.tagName || "input").toLowerCase() + "[name=\"" + element.name.replace(/"/g, "\\\"") + "\"]";
+            } else if (element.className && typeof element.className === "string") {
+              const cls = element.className.trim().split(/\s+/)
+                .filter(function (c) { return c && !c.startsWith("jaal-"); }).slice(0, 2);
+              sel = (element.tagName || "input").toLowerCase() +
+                    (cls.length ? ("." + cls.join(".")) : "");
+            } else {
+              sel = (element.tagName || "input").toLowerCase();
+            }
+            _searchInputSelector = sel;
+            _refreshSel();
+            _updateConfigInStorage({ searchInputSelector: sel });
+            log.info && log.info("search_picked", { phase: "mutate", sel: sel });
+          } catch (err) {
+            // Cancelled or failed — silent
+          } finally {
+            pickBtn.disabled = false;
+            pickBtn.textContent = "Pick";
+          }
+        });
+      }
+
+      if (clearBtn) {
+        clearBtn.addEventListener("click", function () {
+          _searchInputSelector = null;
+          _refreshSel();
+          _updateConfigInStorage({ searchInputSelector: null });
+          log.info && log.info("search_cleared", { phase: "mutate" });
+        });
+      }
+
+      if (valInput) {
+        let _valTimer = null;
+        valInput.addEventListener("input", function () {
+          _searchInputValue = valInput.value;
+          if (_valTimer) clearTimeout(_valTimer);
+          _valTimer = setTimeout(function () {
+            _updateConfigInStorage({ searchInputValue: _searchInputValue || null });
+          }, 400);
+        });
+      }
     }
 
     // ─── Header buttons ─────────────────────────────────────────────
@@ -742,11 +886,32 @@
         "<button class=\"jaal-hbtn jaal-show-hidden\" title=\"Show hidden columns\" style=\"display:none\">Hidden</button>" +
         "<button class=\"jaal-hbtn jaal-finalize\" title=\"Save for auto-inject\">" + (_isFinalized ? "Unfinalize" : "Finalize") + "</button>" +
         "<button class=\"jaal-hbtn jaal-reset\" title=\"Reset sort and filters\">Reset</button>" +
+        "<button class=\"jaal-hbtn jaal-settings-toggle\" title=\"Settings\">⚙</button>" +
         "<button class=\"jaal-hbtn jaal-repick\" title=\"Re-pick element\">↺</button>" +
         "<button class=\"jaal-hbtn jaal-close\" title=\"Close\">✕</button>" +
         "</div>" +
         "<div class=\"jaal-columns\">" + colsHTML + "</div>" +
+        _buildSettingsHTML() +
         "<div class=\"jaal-status\"></div>"
+      );
+    }
+
+    function _buildSettingsHTML() {
+      const sel = _searchInputSelector || "";
+      const val = _searchInputValue || "";
+      return (
+        "<div class=\"jaal-settings\" style=\"display:none\">" +
+          "<div class=\"jaal-set-row\">" +
+            "<span class=\"jaal-set-label\">Search bar:</span>" +
+            "<span class=\"jaal-set-value jaal-search-sel" + (sel ? "" : " empty") + "\" title=\"" + escHtml(sel) + "\">" + escHtml(sel || "(not picked)") + "</span>" +
+            "<button class=\"jaal-set-btn jaal-search-pick\" title=\"Pick the search input element\">Pick</button>" +
+            "<button class=\"jaal-set-btn danger jaal-search-clear\" title=\"Clear search-bar binding\">✕</button>" +
+          "</div>" +
+          "<div class=\"jaal-set-row\">" +
+            "<span class=\"jaal-set-label\">Search value:</span>" +
+            "<input class=\"jaal-search-value\" placeholder=\"text auto-typed into search bar on load\" value=\"" + escHtml(val) + "\" />" +
+          "</div>" +
+        "</div>"
       );
     }
 
@@ -768,6 +933,7 @@
     _setupColHighlight(toolbar);
     _setupHeaderButtons(toolbar);
     _setupFinalizeButton(toolbar);
+    _setupSettings(toolbar);
 
     if (_savedPagination) {
       const detectBtn  = toolbar.querySelector(".jaal-detect");

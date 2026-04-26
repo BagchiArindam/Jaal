@@ -110,8 +110,8 @@
     let loadingInst = null;
     try {
       const { element: containerEl, hint: hintEl } = await Jaal.picker.activate({
-        tooltipHeader: "Select the list container",
-        prompt: "Pick the WRAPPER element containing all repeating items (e.g. a <ul> or grid <div>). Scroll ↕ to walk up the tree.",
+        tooltipHeader: "Click the LIST CONTAINER (parent)",
+        prompt: "Pick the PARENT element that holds all repeating items — not an item itself. Scroll ↕ to walk up the tree.",
         highlightColor: "#ff6b35",
       });
 
@@ -298,6 +298,8 @@
           finalized: true,
           label: (v2cfg && v2cfg.label) || "Jaal",
           configId: key,
+          searchInputSelector: v2cfg && v2cfg.searchInputSelector,
+          searchInputValue:    v2cfg && v2cfg.searchInputValue,
         }
       );
       Jaal._activeToolbars.set(key, inst);
@@ -305,6 +307,11 @@
         Jaal._activeToolbars.delete(key);
         if (Jaal.sorter) Jaal.sorter.clearOriginalOrder();
       });
+    }
+
+    // Pre-fill the page's search input if the saved config has one
+    if (v2cfg && v2cfg.searchInputSelector && v2cfg.searchInputValue) {
+      _prefillSearchInput(v2cfg.searchInputSelector, v2cfg.searchInputValue);
     }
     log.info("auto_activated", { phase: "init", items: items.length, cols: config.columns.length, configId: key });
     return true;
@@ -334,6 +341,28 @@
         log.warn("auto_activate_timeout", { phase: "init", containerSel: config.containerSelector });
       }
     }, 30000);
+  }
+
+  // Pre-fill a page <input> with the saved search value. Skip if the input
+  // already has a non-empty value (don't clobber user input).
+  function _prefillSearchInput(selector, value) {
+    try {
+      const el = document.querySelector(selector);
+      if (!el) {
+        log.warn("search_prefill_no_match", { phase: "init", selector: selector });
+        return;
+      }
+      if (el.value && el.value.length > 0) {
+        log.info("search_prefill_skip_nonempty", { phase: "init" });
+        return;
+      }
+      el.value = value;
+      el.dispatchEvent(new Event("input", { bubbles: true }));
+      el.dispatchEvent(new Event("change", { bubbles: true }));
+      log.info("search_prefilled", { phase: "init", value: value });
+    } catch (err) {
+      log.warn("search_prefill_failed", { phase: "error", err: err && err.message });
+    }
   }
 
   // Expose for toolbar repick button

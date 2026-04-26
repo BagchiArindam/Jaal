@@ -147,7 +147,72 @@
     return { metadata, samples: cleanedSamples };
   }
 
-  ns.htmlExtractor = { extractMinimalHTML };
+  // ─── analyzeParent ──────────────────────────────────────────────────────
+  //
+  // Given a "list parent" element (the wrapper holding repeating items),
+  // returns { layout, items, itemSelector } deterministically:
+  //   layout       — "1D" if direct children are the repeating units,
+  //                  "2D-matrix" if children are row/grid wrappers and the
+  //                  true repeating units live one level deeper.
+  //   items        — Element[] of the repeating units (NOT the parent's
+  //                  immediate children if 2D).
+  //   itemSelector — relative CSS selector that matches one item from the
+  //                  parent. Built from the most common tag + 2 classes
+  //                  shared across siblings.
+  //
+  // Reuses unwrapToRepeatingItems (depth ≤ 4) for 2D detection.
+
+  function _commonClasses(elements) {
+    if (!elements.length) return [];
+    let common = null;
+    for (const el of elements) {
+      const cls = (typeof el.className === "string")
+        ? el.className.trim().split(/\s+/).filter(function (c) { return c && !c.startsWith("jaal-"); })
+        : [];
+      const set = new Set(cls);
+      if (common === null) common = cls;
+      else common = common.filter(function (c) { return set.has(c); });
+      if (common.length === 0) break;
+    }
+    return (common || []).slice(0, 2);
+  }
+
+  function _itemSelectorFor(items) {
+    if (!items.length) return "";
+    const first = items[0];
+    const tag = first.tagName ? first.tagName.toLowerCase() : "*";
+    const classes = _commonClasses(items);
+    if (classes.length) {
+      return tag + "." + classes.map(function (c) {
+        try { return CSS.escape(c); } catch (_) { return c; }
+      }).join(".");
+    }
+    return tag;
+  }
+
+  function analyzeParent(parent) {
+    if (!parent || parent.nodeType !== 1) {
+      return { layout: "1D", items: [], itemSelector: "" };
+    }
+    const directChildren = Array.from(parent.children);
+    if (directChildren.length === 0) {
+      return { layout: "1D", items: [], itemSelector: "" };
+    }
+
+    const unwrapped = unwrapToRepeatingItems(directChildren);
+    const items = unwrapped || directChildren;
+    const layout = unwrapped ? "2D-matrix" : "1D";
+    const itemSelector = _itemSelectorFor(items);
+
+    console.log("[Jaal.htmlExtractor] analyzeParent —",
+      "layout=" + layout,
+      "items=" + items.length,
+      "itemSelector=" + itemSelector);
+
+    return { layout: layout, items: items, itemSelector: itemSelector };
+  }
+
+  ns.htmlExtractor = { extractMinimalHTML, analyzeParent, unwrapToRepeatingItems };
   console.log("[Jaal] html-extractor loaded");
 
 })(typeof globalThis !== "undefined" ? globalThis : this);
