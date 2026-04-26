@@ -1,0 +1,219 @@
+body {
+  font: 13px -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  margin: 0;
+  width: 440px;
+  background: #f9fafb;
+  color: #1a1a2e;
+}
+
+/* Tabs */
+.tabs {
+  display: flex;
+  border-bottom: 1px solid #e5e7eb;
+  background: #fff;
+}
+.tab {
+  flex: 1;
+  padding: 10px 8px;
+  background: none;
+  border: none;
+  border-bottom: 2px solid transparent;
+  cursor: pointer;
+  font-size: 12px;
+  color: #6b7280;
+  font-weight: 500;
+}
+.tab.active {
+  color: #2563eb;
+  border-bottom-color: #2563eb;
+}
+.tab:hover:not(.active) { background: #f3f4f6; }
+
+.panel { padding: 12px; }
+
+/* Tools panel */
+.button {
+  display: block;
+  width: 100%;
+  padding: 10px;
+  margin-bottom: 8px;
+  background: #2563eb;
+  color: white;
+  border: none;
+  border-radius: 6px;
+  cursor: pointer;
+  font-size: 13px;
+  font-weight: 500;
+  transition: background-color 0.15s;
+}
+.button:hover { background: #1d4ed8; }
+.button:active { background: #1e40af; }
+.divider {
+  border-top: 1px solid #e5e7eb;
+  margin: 12px 0;
+}
+.status {
+  font: 11px monospace;
+  color: #6b7280;
+  margin-top: 10px;
+  padding: 8px;
+  background: #fff;
+  border-radius: 4px;
+  border: 1px solid #e5e7eb;
+}
+.status.online {
+  color: #059669;
+  background: #ecfdf5;
+  border-color: #d1fae5;
+}
+.status.offline {
+  color: #dc2626;
+  background: #fef2f2;
+  border-color: #fee2e2;
+}
+.status-icon { display: inline-block; margin-right: 4px; }
+
+/* Patterns panel */
+.patterns-list {
+  max-height: 400px;
+  overflow-y: auto;
+  margin-bottom: 8px;
+}
+.patterns-list .empty {
+  text-align: center;
+  color: #9ca3af;
+  padding: 24px 8px;
+  font-style: italic;
+}
+.domain-group {
+  margin-bottom: 12px;
+}
+.domain-header {
+  font-weight: 600;
+  font-size: 12px;
+  color: #374151;
+  margin-bottom: 4px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.domain-count {
+  font-weight: normal;
+  color: #9ca3af;
+  font-size: 11px;
+}
+.config-row {
+  background: #fff;
+  border: 1px solid #e5e7eb;
+  border-radius: 6px;
+  padding: 8px 10px;
+  margin-bottom: 6px;
+  font-size: 12px;
+}
+.config-label {
+  font-weight: 600;
+  color: #1a1a2e;
+  margin-bottom: 2px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.config-meta {
+  display: grid;
+  grid-template-columns: 60px 1fr;
+  gap: 2px 8px;
+  font-family: "SFMono-Regular", Consolas, monospace;
+  font-size: 10px;
+  color: #6b7280;
+  margin-bottom: 4px;
+}
+.config-meta .key { color: #9ca3af; }
+.config-meta .val { color: #374151; word-break: break-all; }
+.config-actions {
+  display: flex;
+  gap: 4px;
+  margin-top: 4px;
+  justify-content: flex-end;
+}
+.btn {
+  background: #f3f4f6;
+  border: 1px solid #e5e7eb;
+  border-radius: 4px;
+  padding: 3px 8px;
+  font-size: 11px;
+  cursor: pointer;
+  color: #374151;
+  font-family: inherit;
+}
+.btn:hover { background: #e5e7eb; }
+.btn-sm { padding: 4px 10px; font-size: 11px; }
+.btn-primary { background: #2563eb; color: #fff; border-color: #2563eb; }
+.btn-primary:hover { background: #1d4ed8; }
+.btn-danger { background: #fef2f2; color: #dc2626; border-color: #fecaca; }
+.btn-danger:hover { background: #fee2e2; }
+
+/* Edit form (inline) */
+.config-edit {
+  background: #fff;
+  border: 1px solid #93c5fd;
+  border-radius: 6px;
+  padding: 8px 10px;
+  margin-bottom: 6px;
+}
+.edit-field {
+  display: grid;
+  grid-template-columns: 64px 1fr;
+  gap: 4px 8px;
+  margin-bottom: 6px;
+  align-items: center;
+}
+.edit-field label {
+  font-size: 11px;
+  color: #6b7280;
+}
+.edit-field input {
+  padding: 3px 6px;
+  font-size: 11px;
+  border: 1px solid #d1d5db;
+  border-radius: 4px;
+  font-family: inherit;
+  width: 100%;
+  box-sizing: border-box;
+}
+.edit-field input:focus {
+  border-color: #2563eb;
+  outline: none;
+  box-shadow: 0 0 0 2px rgba(37, 99, 235, .15);
+}
+
+/* Footer */
+.patterns-footer {
+  display: flex;
+  gap: 6px;
+  padding-top: 8px;
+  border-top: 1px solid #e5e7eb;
+}
+.patterns-footer .btn { flex: 1; }
+
+/* Sitemap suggestions */
+.suggest-result {
+  margin-top: 8px;
+  padding: 8px;
+  background: #fff;
+  border: 1px solid #e5e7eb;
+  border-radius: 6px;
+  font-size: 11px;
+}
+.suggest-result .suggest-title {
+  font-weight: 600;
+  margin-bottom: 4px;
+  color: #374151;
+}
+.suggest-pat {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 0;
+  font-family: monospace;
+}
+.suggest-pat-text { flex: 1; color: #1a1a2e; }
