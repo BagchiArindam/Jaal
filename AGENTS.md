@@ -17,13 +17,15 @@ This file is the source of truth. `CLAUDE.md` is a one-line shim. Follow everyth
 extension/          WebExtension variant (MV3 Chrome + MV2 Firefox)
   manifest.json           MV3
   manifest.v2.json        MV2
-  background.js           context menu + server relay
+  background.js           context menu + server relay + jaal_configs auto-inject
   content/                content scripts, import from ../shared
   ui/                     toolbars, overlays, picker UI
+  popup/                  browser-action popup: Saved patterns + Tools tabs
 userscript/         Tampermonkey variant
   jaal.user.js            built by build/build-userscript.mjs
 shared/             core logic, imported by both variants
-  html-extractor.js       DOM → sample extraction (from lib-sortsight-js)
+  html-extractor.js       DOM → super-item extraction (analyzeParent + buildSyntheticSuperItem)
+  url-glob.js             tiny URL path glob matcher (* per-segment, ** any-depth)
   net-hooks.js            fetch/XHR/WS interceptor (from lib-sortsight-js)
   sync.js                 small storage sync helper (from lib-sortsight-js)
   skeleton.js             DOM tree logic (from dom-skeleton-inspector)
@@ -73,6 +75,44 @@ node build/dev-sync.mjs     # run once after clone, and after any edit to shared
 ```
 
 The synced copies live under `.gitignore` — never edit them by hand; always edit the originals in `shared/` and rerun the sync. Build scripts (`build-extension.mjs`, `build-userscript.mjs`, `build-firefox.mjs`) are available in Phase C-8; dev-sync.mjs still copies for rapid development and is run as a pre-step by build scripts.
+
+## Persistent storage: jaal_configs
+
+All saved per-list configurations live in `chrome.storage.local["jaal_configs"]` as an array. Each entry is composite-keyed by `domain + pathPattern + parentSelector` so multiple lists per page are supported (one finalized config per list area). Migrations from sort-sight (`sortsight_finalized` → `jaal_finalized`) and from v1 (`jaal_finalized` → `jaal_configs`) run idempotently on install/startup.
+
+Entry shape:
+```js
+{
+  id: "uuid",                       // stable for popup row keys
+  domain: "amazon.com",
+  pathPattern: "/s*",               // glob: "*" any-segment, "**" any-depth
+  parentSelector: "#search > .list",
+  label: "Search results",
+  layout: "1D" | "2D-matrix",
+  itemSelector: ".item",            // computed at pick time, relative to parent
+  columns: [{name, selector, attribute, dataType, hidden?}, ...],
+  pagination: {type, ...} | null,
+  searchInputSelector: string|null, // optional: pick-mode result for the page search bar
+  searchInputValue:    string|null, // optional: text auto-typed into search bar on auto-activate
+  finalizedAt: ISO8601,
+  createdAt:   ISO8601,
+}
+```
+
+Auto-injection: `background.js` filters configs by `domain` exact match + glob path; sends `jaal-auto-activate-multi` with the matching array; `content-main` spawns one toolbar instance per matching config whose `parentSelector` is present in the DOM (others silently skip).
+
+Manage configs in the browser-action popup → **Saved patterns** tab (list / inline-edit / delete / Export JSON / Import JSON / Suggest patterns from sitemap).
+
+## Picker + extraction pipeline
+
+- The picker prompts users to **click the LIST CONTAINER (parent)**, not an item. The deterministic `analyzeParent(parentEl)` (in `shared/html-extractor.js`) walks `parent.children`, runs `unwrapToRepeatingItems` for 2D-matrix detection, and returns `{layout, items, itemSelector}` without AI.
+- `buildSyntheticSuperItem(items)` then walks every item's leaf nodes (text, `<img>` src, `<a>` href, `<input>` value, `<time>` datetime), groups by `(tag + classes + attribute)` signature, and emits ONE synthetic HTML element containing one representative node per unique field. This single super-item — the union of all fields ever observed across any item — is sent to `/analyze` instead of 2-3 random samples, so a list where item A has a "discount" badge and item B has "out-of-stock" yields BOTH fields.
+- `content-main` overrides the server's `itemSelector` with `analyzeParent`'s deterministic value (server only saw the synthetic wrapper).
+- Falls back to the legacy random-sample flow if super-item produces 0 fields.
+
+## Multi-toolbar
+
+`Jaal.toolbar.create(...)` is a factory: each call returns an isolated instance with its own host element, shadow DOM, and closure-scoped state (sort, filters, hidden columns, search-bar binding). Active instances are tracked in `_root.Jaal._activeToolbars` keyed by `configId`. Stacked top-right with `top = 20 + index * 56`.
 
 ## Conventions
 
@@ -132,3 +172,5 @@ Local fixtures in `test/test-pages/` (products, tables, paginated). Real sites p
 - Mid-scrape kill + restart resumes from last checkpoint
 - Logs parse with `parse-logs.py`
 - Firefox permanent install: `npm run build:firefox` → about:addons → Install from File → select dist-firefox.xpi → persists across restart
+- Popup → Saved patterns lists all `jaal_configs` entries grouped by domain; Edit/Delete/Export/Import all round-trip
+- Multi-toolbar: a page with two finalized configs (different `parentSelector`s) spawns two stacked toolbars on load; deleting one config + reload removes one toolbar
