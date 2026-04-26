@@ -13,7 +13,9 @@ document.getElementById("skeleton-btn").addEventListener("click", () => {
   console.log("[Jaal popup] skeleton button clicked");
   B.tabs.query({ active: true, currentWindow: true }, (tabs) => {
     if (tabs[0]) {
-      B.runtime.sendMessage({ type: "jaal-inject-skeleton" });
+      // Popup messages have sender.tab === undefined in the bg handler, so we
+      // must pass tabId explicitly.
+      B.runtime.sendMessage({ type: "jaal-inject-skeleton", tabId: tabs[0].id });
       window.close();
     }
   });
@@ -24,7 +26,7 @@ document.getElementById("net-recorder-btn").addEventListener("click", () => {
   console.log("[Jaal popup] net recorder button clicked");
   B.tabs.query({ active: true, currentWindow: true }, (tabs) => {
     if (tabs[0]) {
-      B.runtime.sendMessage({ type: "jaal-inject-net-recorder" });
+      B.runtime.sendMessage({ type: "jaal-inject-net-recorder", tabId: tabs[0].id });
       window.close();
     }
   });

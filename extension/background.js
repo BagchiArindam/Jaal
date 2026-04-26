@@ -253,17 +253,25 @@ B.runtime.onMessage.addListener(function (msg, sender, sendResponse) {
   }
 
   if (msg.type === "jaal-inject-skeleton") {
-    // Popup button clicked for skeleton inspector
-    if (sender && sender.tab && sender.tab.id) {
-      injectSkeletonInspector(sender.tab.id);
+    // Popup messages carry tabId in payload (sender.tab is undefined for popups);
+    // content-script messages set sender.tab.
+    const tabId = (typeof msg.tabId === "number") ? msg.tabId
+                : (sender && sender.tab && sender.tab.id);
+    if (typeof tabId === "number") {
+      injectSkeletonInspector(tabId);
+    } else {
+      console.warn(LOG_TAG, "jaal-inject-skeleton: no tabId resolved");
     }
     return false;
   }
 
   if (msg.type === "jaal-inject-net-recorder") {
-    // Popup button clicked for net recorder
-    if (sender && sender.tab && sender.tab.id) {
-      injectNetRecorder(sender.tab.id);
+    const tabId = (typeof msg.tabId === "number") ? msg.tabId
+                : (sender && sender.tab && sender.tab.id);
+    if (typeof tabId === "number") {
+      injectNetRecorder(tabId);
+    } else {
+      console.warn(LOG_TAG, "jaal-inject-net-recorder: no tabId resolved");
     }
     return false;
   }
