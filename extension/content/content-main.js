@@ -2,28 +2,29 @@
  * extension/content/content-main.js — content-script entry point (isolated world).
  *
  * Routes background → content activation messages to the appropriate overlay or
- * orchestrates the picker → analyze → toolbar flow.
+ * orchestrates the picker → analyze → toolbar flow. Supports multiple toolbar
+ * instances spawned per-config from jaal-auto-activate-multi.
  *
  * Handled messages (from background via B.tabs.sendMessage):
- *   jaal-activate-skeleton      → window.Jaal.skeletonOverlay.show()
- *   jaal-activate-net-recorder  → window.Jaal.netRecorderOverlay.show()
- *   jaal-activate-picker        → startPicking()
- *   jaal-start-pick             → startPicking() (repick from toolbar)
+ *   jaal-activate-skeleton       → Jaal.skeletonOverlay.show()
+ *   jaal-activate-net-recorder   → Jaal.netRecorderOverlay.show()
+ *   jaal-activate-picker         → startPicking()
+ *   jaal-start-pick              → startPicking() (repick)
+ *   jaal-auto-activate           → autoActivate(legacyConfig)
+ *   jaal-auto-activate-multi     → for each config, autoActivate(legacyConfig)
  *
  * Exposed globals:
  *   window.Jaal.startPicking()  — called directly by toolbar repick button
+ *   window.Jaal._activeToolbars  — Map<configId, instance> for live tracking
  */
 (function () {
   "use strict";
 
   // CRITICAL: In Firefox content scripts, window !== globalThis.
-  // shared/ files all use globalThis, so we must too — otherwise we see a
-  // separate empty Jaal namespace and Jaal.picker (etc) appears undefined.
   const _root = (typeof globalThis !== "undefined") ? globalThis : window;
 
   if (_root.__jaalContentMainLoaded) {
     console.log("[Jaal content-main] already loaded — re-registering message listener");
-    // Don't skip; re-register the listener in case a new UI was injected
   } else {
     _root.__jaalContentMainLoaded = true;
   }
@@ -32,7 +33,11 @@
   const log  = Jaal.makeLogger ? Jaal.makeLogger("content-main") : console;
   const B    = typeof browser !== "undefined" ? browser : chrome;
 
-  console.log("[Jaal content-main] initializing, Jaal namespace ready, Jaal keys:", Object.keys(Jaal).join(","));
+  // Track live toolbar instances keyed by configId (or "manual-<n>" for picks)
+  Jaal._activeToolbars = Jaal._activeToolbars || new Map();
+  let _manualCounter = 0;
+
+  console.log("[Jaal content-main] initializing, Jaal keys:", Object.keys(Jaal).join(","));
 
   // --- Message routing ---
 
@@ -61,29 +66,24 @@
       startPicking();
 
     } else if (msg.type === "jaal-auto-activate") {
-      // Legacy single-config message (kept for backward compatibility).
+      // Legacy single-config message
       log.info("auto_activate", { phase: "mutate", url: msg.config && msg.config.urlPattern });
-      autoActivate(msg.config);
+      autoActivate(msg.config, null);
 
     } else if (msg.type === "jaal-auto-activate-multi") {
-      // New: bg sends an array of jaal_configs entries that match this URL.
-      // Tier 3 will spawn one toolbar per matching config; until then the
-      // singleton toolbar means we can only show the first whose parent is
-      // present in the DOM.
       const configs = Array.isArray(msg.configs) ? msg.configs : [];
       log.info("auto_activate_multi", { phase: "mutate", count: configs.length });
       for (let i = 0; i < configs.length; i++) {
         const cfg = configs[i];
         if (!cfg || !cfg.parentSelector) continue;
-        if (!document.querySelector(cfg.parentSelector)) continue;
-        autoActivate(_configToLegacyShape(cfg));
-        break;
+        const legacy = _configToLegacyShape(cfg);
+        autoActivate(legacy, cfg);
       }
     }
   });
 
-  // Adapter: convert a Tier-2 jaal_configs entry into the legacy shape that
-  // _tryAutoActivate / autoActivate expect.
+  // Adapter: convert v2 config to the (containerSelector, itemSelector,
+  // columns, pagination) shape the autoActivate path uses internally.
   function _configToLegacyShape(cfg) {
     return {
       containerSelector: cfg.parentSelector,
@@ -107,8 +107,8 @@
       return;
     }
 
+    let loadingInst = null;
     try {
-      console.log("[Jaal content-main] activating picker...");
       const { element: containerEl, hint: hintEl } = await Jaal.picker.activate({
         tooltipHeader: "Select the list container",
         prompt: "Pick the WRAPPER element containing all repeating items (e.g. a <ul> or grid <div>). Scroll ↕ to walk up the tree.",
@@ -118,35 +118,33 @@
       log.info("container_picked", { phase: "mutate", tag: containerEl.tagName });
 
       if (Jaal.toolbar) {
-        Jaal.toolbar.showLoading("Analyzing…", containerEl);
-        Jaal.toolbar.onClose(function () {
+        loadingInst = Jaal.toolbar.showLoading("Analyzing…", containerEl);
+        loadingInst.onClose(function () {
           if (Jaal.sorter) Jaal.sorter.clearOriginalOrder();
         });
       }
 
-      await analyzeAndBuildToolbar(containerEl, hintEl);
+      await analyzeAndBuildToolbar(containerEl, hintEl, loadingInst);
 
     } catch (err) {
       if (err.message === "Picker cancelled") {
-        if (Jaal.toolbar) Jaal.toolbar.destroy();
+        if (loadingInst) loadingInst.destroy();
         return;
       }
       log.error("picker_error", { phase: "error", err: err.message });
-      if (Jaal.toolbar) Jaal.toolbar.showError("Picker error: " + err.message);
+      if (loadingInst) loadingInst.showError("Picker error: " + err.message);
     }
   }
 
-  async function analyzeAndBuildToolbar(containerEl, hintEl) {
+  async function analyzeAndBuildToolbar(containerEl, hintEl, loadingInst) {
     const containerSelector = buildSelector(containerEl);
 
-    // Extract minimal HTML for AI analysis
     let metadata, samples;
     if (Jaal.htmlExtractor && Jaal.htmlExtractor.extractMinimalHTML) {
       const extracted = Jaal.htmlExtractor.extractMinimalHTML(containerEl, 3, hintEl);
       metadata = extracted.metadata;
       samples  = extracted.samples;
     } else {
-      // Fallback: send raw outerHTML of first 3 children
       const children = Array.from(containerEl.children).slice(0, 3);
       samples  = children.map(function (el) { return el.outerHTML; });
       metadata = { url: window.location.href, containerTag: containerEl.tagName.toLowerCase() };
@@ -160,26 +158,37 @@
 
       if (!response || !response.ok) {
         const msg = response && response.error ? response.error : "Server error";
-        handleAnalysisError(msg);
+        handleAnalysisError(msg, loadingInst);
         return;
       }
 
       const analysis = response.data;
       const validation = validateAnalysis(containerEl, analysis);
       if (!validation.valid) {
-        if (Jaal.toolbar) Jaal.toolbar.showError("Analysis failed: " + validation.reason + ". Try selecting a different element.");
+        if (loadingInst) loadingInst.showError("Analysis failed: " + validation.reason + ". Try selecting a different element.");
         return;
       }
 
       if (Jaal.toolbar) {
-        Jaal.toolbar.create(
-          { columns: validation.columns, itemSelector: analysis.itemSelector },
-          containerEl,
-          analysis.itemSelector,
-          validation.itemCount,
-          { containerSelector: containerSelector }
-        );
-        Jaal.toolbar.onClose(function () {
+        const key = "manual-" + (++_manualCounter);
+        const inst = (loadingInst && loadingInst.upgrade)
+          ? loadingInst.upgrade(
+              { columns: validation.columns, itemSelector: analysis.itemSelector },
+              containerEl,
+              analysis.itemSelector,
+              validation.itemCount,
+              { containerSelector: containerSelector, label: "Jaal · pick", configId: key }
+            )
+          : Jaal.toolbar.create(
+              { columns: validation.columns, itemSelector: analysis.itemSelector },
+              containerEl,
+              analysis.itemSelector,
+              validation.itemCount,
+              { containerSelector: containerSelector, label: "Jaal · pick", configId: key }
+            );
+        Jaal._activeToolbars.set(key, inst);
+        inst.onClose(function () {
+          Jaal._activeToolbars.delete(key);
           if (Jaal.sorter) Jaal.sorter.clearOriginalOrder();
         });
       }
@@ -187,7 +196,7 @@
       log.info("toolbar_built", { phase: "init", cols: validation.columns.length, items: validation.itemCount });
 
     } catch (err) {
-      handleAnalysisError(err.message);
+      handleAnalysisError(err.message, loadingInst);
     }
   }
 
@@ -205,7 +214,6 @@
     if (!analysis.columns || analysis.columns.length === 0) {
       return { valid: false, reason: "No columns identified" };
     }
-    // Keep only columns whose selectors actually match something
     const validColumns = analysis.columns.filter(function (col) {
       if (!col.selector || col.selector === "") return true;
       const safeSel = col.selector.trimStart().startsWith(">") ? ":scope " + col.selector : col.selector;
@@ -220,14 +228,15 @@
     return { valid: true, columns: validColumns, itemCount: items.length };
   }
 
-  function handleAnalysisError(message) {
+  function handleAnalysisError(message, loadingInst) {
     let userMsg;
     if (message && (message.includes("Failed to fetch") || message.includes("NetworkError") || message.includes("net::ERR"))) {
       userMsg = "Cannot reach Jaal server. Make sure it is running on port 7773.";
     } else {
       userMsg = "Error: " + (message || "Unknown error");
     }
-    if (Jaal.toolbar) Jaal.toolbar.showError(userMsg);
+    if (loadingInst) loadingInst.showError(userMsg);
+    else if (Jaal.toolbar) Jaal.toolbar.showError(userMsg);
     log.error("analysis_error", { phase: "error", message: message });
   }
 
@@ -261,46 +270,61 @@
 
   // --- Auto-activate from finalized config ---
 
-  function _tryAutoActivate(config) {
+  function _tryAutoActivate(config, v2cfg) {
     const containerEl = document.querySelector(config.containerSelector);
     if (!containerEl) return false;
-    const safeItemSel = config.itemSelector.trimStart().startsWith(">")
+    const safeItemSel = config.itemSelector && config.itemSelector.trimStart().startsWith(">")
       ? ":scope " + config.itemSelector
       : config.itemSelector;
+    if (!safeItemSel) return false;
     const items = containerEl.querySelectorAll(safeItemSel);
     if (items.length === 0) return false;
 
+    const key = (v2cfg && v2cfg.id) || ("auto-" + (++_manualCounter));
+    if (Jaal._activeToolbars.has(key)) {
+      // Already spawned for this config (e.g. mutation observer fired twice)
+      return true;
+    }
+
     if (Jaal.toolbar) {
-      Jaal.toolbar.create(
+      const inst = Jaal.toolbar.create(
         { columns: config.columns, itemSelector: config.itemSelector },
         containerEl,
         config.itemSelector,
         items.length,
-        { containerSelector: config.containerSelector, pagination: config.pagination || null, finalized: true }
+        {
+          containerSelector: config.containerSelector,
+          pagination: config.pagination || null,
+          finalized: true,
+          label: (v2cfg && v2cfg.label) || "Jaal",
+          configId: key,
+        }
       );
-      Jaal.toolbar.onClose(function () {
+      Jaal._activeToolbars.set(key, inst);
+      inst.onClose(function () {
+        Jaal._activeToolbars.delete(key);
         if (Jaal.sorter) Jaal.sorter.clearOriginalOrder();
       });
     }
-    log.info("auto_activated", { phase: "init", items: items.length, cols: config.columns.length });
+    log.info("auto_activated", { phase: "init", items: items.length, cols: config.columns.length, configId: key });
     return true;
   }
 
-  function autoActivate(config) {
+  function autoActivate(config, v2cfg) {
     if (!config || !config.containerSelector) return;
-    if (_tryAutoActivate(config)) return;
+    if (_tryAutoActivate(config, v2cfg)) return;
 
-    // SPA: content not in DOM yet — watch for mutations up to 30 s
+    // SPA: content not in DOM yet — watch for mutations up to 30s
     let done = false;
     const observer = new MutationObserver(function () {
       if (done) return;
-      if (_tryAutoActivate(config)) { done = true; observer.disconnect(); clearInterval(poll); clearTimeout(timeout); }
+      if (_tryAutoActivate(config, v2cfg)) { done = true; observer.disconnect(); clearInterval(poll); clearTimeout(timeout); }
     });
     observer.observe(document.body, { childList: true, subtree: true });
 
     const poll = setInterval(function () {
       if (done) return;
-      if (_tryAutoActivate(config)) { done = true; observer.disconnect(); clearInterval(poll); clearTimeout(timeout); }
+      if (_tryAutoActivate(config, v2cfg)) { done = true; observer.disconnect(); clearInterval(poll); clearTimeout(timeout); }
     }, 2000);
 
     const timeout = setTimeout(function () {

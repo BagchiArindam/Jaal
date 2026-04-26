@@ -1,19 +1,28 @@
 /**
- * extension/ui/toolbar.js — floating sort/filter toolbar.
+ * extension/ui/toolbar.js — floating sort/filter toolbar (multi-instance factory).
  *
- * Renders a draggable, shadow-DOM-isolated panel near the picked container.
- * Wires up window.Jaal.sorter for sort/filter and window.Jaal.paginator for
- * pagination detection and list flattening.
+ * Each Jaal.toolbar.create(...) call returns an isolated instance with its own
+ * shadow DOM, state, and event handlers. Multiple instances can co-exist on
+ * one page (one per finalized jaal_configs entry whose parentSelector is in DOM).
  *
  * Public API (window.Jaal.toolbar):
- *   create(analysis, container, itemSelector, totalItems, options) → hostEl
- *   showLoading(message, nearElement)
- *   showError(message)
- *   destroy()
- *   onClose(cb)
+ *   create(analysis, container, itemSelector, totalItems, options) → instance
+ *   showLoading(message, nearElement)                              → instance
+ *   showError(message, instance?)                                  → void
  *
- * analysis shape:  { columns: [{ name, selector, attribute, dataType }], itemSelector }
- * options shape:   { containerSelector, pagination, finalized }
+ * instance API (returned by create / showLoading):
+ *   destroy()           — remove host element from page
+ *   onClose(cb)         — register a close callback
+ *   refresh()           — re-render counts/status
+ *   hostEl              — the outer <div> living in document.body
+ *   isLoading           — true if this is a showLoading instance
+ *   upgrade(analysis, container, itemSelector, totalItems, options)
+ *                       — convert a loading instance into a full toolbar in-place
+ *
+ * Vertical stacking: each new instance positions itself based on _instances
+ * count (top = 20 + index * (panel height + gap)).
+ *
+ * options shape: { containerSelector, pagination, finalized, label, configId }
  */
 (function (global) {
   "use strict";
@@ -22,22 +31,10 @@
   const log = ns.makeLogger ? ns.makeLogger("toolbar") : console;
   const B   = typeof browser !== "undefined" ? browser : (typeof chrome !== "undefined" ? chrome : null);
 
-  // --- Internal state ---
-  let _hostEl          = null;
-  let _shadowRoot      = null;
-  let _closeCb         = null;
-  let _currentSort     = { colIndex: -1, direction: null };
-  let _filterValues    = [];
-  let _nullStates      = []; // "off" | "non-null" | "null-only" per column
-  let _hiddenCols      = []; // bool[] per column
-  let _savedPagination = null;
-  let _containerSel    = null;
-  let _itemSel         = null;
-  let _columns         = [];
-  let _isFinalized     = false;
-  let _activeDropCol   = -1;
+  // Active instances (used for vertical stacking + cleanup tracking)
+  const _instances = [];
 
-  // --- CSS ---
+  // --- CSS (shared across all instances; injected per-shadow-root) ---
   const TOOLBAR_CSS = `
 :host {
   all: initial;
@@ -160,7 +157,16 @@
 .jaal-field-highlight { outline: 2px solid #f59e0b !important; outline-offset: 1px !important; background-color: rgba(245,158,11,.12) !important; }
 `;
 
-  // --- Helpers ---
+  // Highlight stylesheet — added to <head> once, shared across all instances
+  let _hlStyleEl = null;
+  function _ensureHlStyle() {
+    if (_hlStyleEl || !document.head) return;
+    _hlStyleEl = document.createElement("style");
+    _hlStyleEl.textContent = ".jaal-field-highlight{outline:2px solid #f59e0b!important;outline-offset:1px!important;background-color:rgba(245,158,11,.12)!important;}";
+    document.head.appendChild(_hlStyleEl);
+  }
+
+  // --- Stateless helpers ---
 
   function escHtml(s) {
     return String(s || "")
@@ -181,583 +187,587 @@
     }
   }
 
-  function sampleValue(col, container, itemSelector) {
-    const items = safeQSA(container, itemSelector);
-    for (let i = 0; i < Math.min(5, items.length); i++) {
-      const val = ns.sorter && ns.sorter.extractValue(items[i], col.selector, col.attribute);
-      if (val != null && String(val).trim() !== "") {
-        const text = String(val).trim();
-        return text.length > 22 ? text.substring(0, 20) + "…" : text;
-      }
-    }
-    return null;
+  function _stackTop(instanceIndex) {
+    // Vertical stacking from top; assume each toolbar is ~48px tall collapsed,
+    // or starts at 20px + index * 56 for a generous gap
+    return 20 + (instanceIndex * 56);
   }
 
-  function collectUniqueValues(col, container, itemSelector) {
-    const items = safeQSA(container, itemSelector);
-    const seen = new Set();
-    const vals = [];
-    for (let i = 0; i < Math.min(200, items.length); i++) {
-      const raw = ns.sorter && ns.sorter.extractValue(items[i], col.selector, col.attribute);
-      const val = raw != null ? String(raw).trim() : null;
-      if (val && !seen.has(val)) { seen.add(val); vals.push(val); }
-      if (vals.length >= 60) break;
-    }
-    return vals.sort(function (a, b) { return a.localeCompare(b, undefined, { numeric: true, sensitivity: "base" }); });
-  }
-
-  // --- Host element + shadow DOM ---
-
-  function _createHost(nearElement) {
-    destroy();
-    _hostEl = document.createElement("div");
-    _hostEl.style.cssText = "position:fixed;top:20px;right:20px;z-index:2147483647";
-    document.body.appendChild(_hostEl);
-
-    _shadowRoot = _hostEl.attachShadow({ mode: "open" });
-    const style = document.createElement("style");
-    style.textContent = TOOLBAR_CSS;
-    _shadowRoot.appendChild(style);
-
-    if (nearElement) {
-      try {
-        const rect = nearElement.getBoundingClientRect();
-        const top  = Math.max(10, Math.min(rect.top, window.innerHeight - 300));
-        const left = rect.left > window.innerWidth / 2
-          ? Math.max(10, rect.left - 540)
-          : Math.min(rect.right + 16, window.innerWidth - 540);
-        _hostEl.style.top  = top  + "px";
-        _hostEl.style.left = left + "px";
-        _hostEl.style.right = "";
-      } catch (_) {}
-    }
-  }
-
-  // --- Drag ---
-
-  function _setupDrag(headerEl) {
-    if (!headerEl) return;
-    let startX, startY, origLeft, origTop;
-    headerEl.addEventListener("mousedown", function (e) {
-      if (e.target.tagName === "BUTTON" || e.target.tagName === "INPUT") return;
-      e.preventDefault();
-      startX = e.clientX; startY = e.clientY;
-      origLeft = _hostEl.offsetLeft; origTop = _hostEl.offsetTop;
-      document.addEventListener("mousemove", onMove, true);
-      document.addEventListener("mouseup",   onUp,   true);
-    });
-    function onMove(e) {
-      _hostEl.style.left  = Math.max(0, origLeft + (e.clientX - startX)) + "px";
-      _hostEl.style.top   = Math.max(0, origTop  + (e.clientY - startY)) + "px";
-      _hostEl.style.right = "";
-    }
-    function onUp() {
-      document.removeEventListener("mousemove", onMove, true);
-      document.removeEventListener("mouseup",   onUp,   true);
-    }
-  }
-
-  // --- Status bar ---
-
-  function _updateStatus(toolbar, container, itemSelector) {
-    const el = toolbar && toolbar.querySelector(".jaal-status");
-    if (!el) return;
-    const all     = safeQSA(container, itemSelector);
-    const visible = all.filter(function (el) { return el.style.display !== "none"; });
-    el.textContent = visible.length + " of " + all.length + " visible";
-  }
-
-  function _updateCount(toolbar, container, itemSelector) {
-    const el = toolbar && toolbar.querySelector(".jaal-count");
-    if (!el) return;
-    const visible = safeQSA(container, itemSelector).filter(function (e) { return e.style.display !== "none"; });
-    el.textContent = visible.length + " items";
-  }
-
-  // --- Effective filter computation ---
-
-  function _effectiveFilters() {
-    return _filterValues.map(function (fv, i) {
-      if (_nullStates[i] === "non-null") return "?";
-      if (_nullStates[i] === "null-only") return "?!";
-      return fv;
-    });
-  }
-
-  function _applyAllFilters(toolbar, container, itemSelector) {
-    if (!ns.sorter) return;
-    ns.sorter.applyFilters(container, itemSelector, _columns, _effectiveFilters());
-    _updateStatus(toolbar, container, itemSelector);
-    _updateCount(toolbar, container, itemSelector);
-  }
-
-  // --- Column name hover → highlight matching fields ---
-
-  let _hlStyleEl = null;
-
-  function _ensureHlStyle() {
-    if (_hlStyleEl || !document.head) return;
-    _hlStyleEl = document.createElement("style");
-    _hlStyleEl.textContent = ".jaal-field-highlight{outline:2px solid #f59e0b!important;outline-offset:1px!important;background-color:rgba(245,158,11,.12)!important;}";
-    document.head.appendChild(_hlStyleEl);
-  }
-
-  function _highlightField(col, container, itemSelector, on) {
-    _ensureHlStyle();
-    const items = safeQSA(container, itemSelector);
-    items.forEach(function (item) {
-      const target = col.selector
-        ? item.querySelector(col.selector.trimStart().startsWith(">") ? ":scope " + col.selector : col.selector)
-        : item;
-      if (target) {
-        if (on) target.classList.add("jaal-field-highlight");
-        else     target.classList.remove("jaal-field-highlight");
-      }
-    });
-  }
-
-  function _setupColHighlight(toolbar, container, itemSelector) {
-    toolbar.querySelectorAll(".jaal-col-name").forEach(function (nameEl) {
-      const colIdx = parseInt(nameEl.getAttribute("data-col"));
-      const col    = _columns[colIdx];
-      if (!col) return;
-      nameEl.addEventListener("mouseenter", function () {
-        nameEl.classList.add("hl-active");
-        _highlightField(col, container, itemSelector, true);
-      });
-      nameEl.addEventListener("mouseleave", function () {
-        nameEl.classList.remove("hl-active");
-        _highlightField(col, container, itemSelector, false);
-      });
-    });
-  }
-
-  // --- Unique-value dropdown ---
-
-  function _openDropdown(toolbar, colIdx, ddBtn, container, itemSelector) {
-    // Close any open dropdown first
-    _closeDropdown(toolbar);
-    _activeDropCol = colIdx;
-    ddBtn.classList.add("open");
-
-    const col  = _columns[colIdx];
-    const vals = collectUniqueValues(col, container, itemSelector);
-
-    const dd = document.createElement("div");
-    dd.className = "jaal-dropdown";
-    dd.setAttribute("data-dd-col", String(colIdx));
-
-    if (vals.length === 0) {
-      const empty = document.createElement("div");
-      empty.className = "jaal-dd-item empty";
-      empty.textContent = "(no values)";
-      dd.appendChild(empty);
-    } else {
-      vals.forEach(function (val) {
-        const item = document.createElement("div");
-        item.className = "jaal-dd-item";
-        item.textContent = val;
-        item.title = val;
-        item.addEventListener("click", function () {
-          const input = toolbar.querySelector(".jaal-filter[data-col=\"" + colIdx + "\"]");
-          if (input) {
-            input.value = val;
-            _filterValues[colIdx] = val;
-            _applyAllFilters(toolbar, container, itemSelector);
-          }
-          _closeDropdown(toolbar);
-        });
-        dd.appendChild(item);
-      });
-    }
-
-    // Position below the button
-    const btnRect = ddBtn.getBoundingClientRect();
-    dd.style.cssText = "position:fixed;top:" + (btnRect.bottom + 2) + "px;left:" + btnRect.left + "px";
-    _shadowRoot.appendChild(dd);
-
-    // Close on outside click
-    setTimeout(function () {
-      document.addEventListener("click", function _ddClose(e) {
-        if (!dd.contains(e.target) && e.target !== ddBtn) {
-          _closeDropdown(toolbar);
-          document.removeEventListener("click", _ddClose, true);
-        }
-      }, true);
-    }, 0);
-  }
-
-  function _closeDropdown(toolbar) {
-    if (!_shadowRoot) return;
-    const existing = _shadowRoot.querySelector(".jaal-dropdown");
-    if (existing) existing.remove();
-    if (_activeDropCol >= 0) {
-      const btn = toolbar && toolbar.querySelector(".jaal-dd-btn[data-col=\"" + _activeDropCol + "\"]");
-      if (btn) btn.classList.remove("open");
-    }
-    _activeDropCol = -1;
-  }
-
-  // --- Sort ---
-
-  function _setupSort(toolbar, container, itemSelector) {
-    toolbar.querySelectorAll(".jaal-sort-btn").forEach(function (btn) {
-      btn.addEventListener("click", function () {
-        const colIdx = parseInt(btn.getAttribute("data-col"));
-        const dir    = btn.getAttribute("data-dir");
-        if (_currentSort.colIndex === colIdx && _currentSort.direction === dir) {
-          ns.sorter && ns.sorter.resetOrder();
-          _currentSort = { colIndex: -1, direction: null };
-          toolbar.querySelectorAll(".jaal-sort-btn").forEach(function (b) { b.classList.remove("active"); });
-        } else {
-          _currentSort = { colIndex: colIdx, direction: dir };
-          toolbar.querySelectorAll(".jaal-sort-btn").forEach(function (b) { b.classList.remove("active"); });
-          btn.classList.add("active");
-          ns.sorter && ns.sorter.sortElements(container, itemSelector, _columns[colIdx], dir);
-        }
-        _updateStatus(toolbar, container, itemSelector);
-      });
-    });
-  }
-
-  // --- Filter text inputs ---
-
-  function _setupFilters(toolbar, container, itemSelector) {
-    toolbar.querySelectorAll(".jaal-filter").forEach(function (input) {
-      input.addEventListener("input", function () {
-        _filterValues[parseInt(input.getAttribute("data-col"))] = input.value;
-        _applyAllFilters(toolbar, container, itemSelector);
-      });
-    });
-  }
-
-  // --- Three-state null buttons ---
-
-  function _setupNullButtons(toolbar, container, itemSelector) {
-    toolbar.querySelectorAll(".jaal-null-btn").forEach(function (btn) {
-      btn.addEventListener("click", function () {
-        const colIdx = parseInt(btn.getAttribute("data-col"));
-        const cur    = _nullStates[colIdx] || "off";
-        const next   = cur === "off" ? "non-null" : cur === "non-null" ? "null-only" : "off";
-        _nullStates[colIdx] = next;
-        btn.className = "jaal-null-btn" + (next !== "off" ? " " + next : "");
-        btn.title = next === "non-null" ? "Has value" : next === "null-only" ? "Empty only" : "Null filter: off";
-        btn.textContent = next === "non-null" ? "?" : next === "null-only" ? "?!" : "○";
-        // Disable text filter input while null-state is active
-        const input = toolbar.querySelector(".jaal-filter[data-col=\"" + colIdx + "\"]");
-        if (input) input.disabled = (next !== "off");
-        _applyAllFilters(toolbar, container, itemSelector);
-      });
-    });
-  }
-
-  // --- Dropdown buttons ---
-
-  function _setupDropdownButtons(toolbar, container, itemSelector) {
-    toolbar.querySelectorAll(".jaal-dd-btn").forEach(function (btn) {
-      btn.addEventListener("click", function (e) {
-        e.stopPropagation();
-        const colIdx = parseInt(btn.getAttribute("data-col"));
-        if (_activeDropCol === colIdx) { _closeDropdown(toolbar); return; }
-        _openDropdown(toolbar, colIdx, btn, container, itemSelector);
-      });
-    });
-  }
-
-  // --- Hide / Show-hidden ---
-
-  function _updateShowHiddenBtn(toolbar) {
-    const hidden = _hiddenCols.filter(Boolean).length;
-    const btn = toolbar.querySelector(".jaal-show-hidden");
-    if (!btn) return;
-    if (hidden === 0) {
-      btn.style.display = "none";
-    } else {
-      btn.style.display = "";
-      btn.textContent = "Hidden (" + hidden + ")";
-    }
-  }
-
-  function _setupHideButtons(toolbar, container, itemSelector) {
-    toolbar.querySelectorAll(".jaal-hide-btn").forEach(function (btn) {
-      btn.addEventListener("click", function () {
-        const colIdx = parseInt(btn.getAttribute("data-col"));
-        _hiddenCols[colIdx] = true;
-        const row = toolbar.querySelector(".jaal-column[data-col-index=\"" + colIdx + "\"]");
-        if (row) row.style.display = "none";
-        _updateShowHiddenBtn(toolbar);
-        _applyAllFilters(toolbar, container, itemSelector);
-      });
-    });
-
-    const showBtn = toolbar.querySelector(".jaal-show-hidden");
-    if (showBtn) {
-      showBtn.addEventListener("click", function () {
-        _hiddenCols = _hiddenCols.map(function () { return false; });
-        toolbar.querySelectorAll(".jaal-column").forEach(function (row) { row.style.display = ""; });
-        _updateShowHiddenBtn(toolbar);
-      });
-    }
-  }
-
-  // --- Finalize / auto-inject (writes to jaal_configs, the v2 schema) ---
-
-  function _setupFinalizeButton(toolbar, container, itemSelector, options) {
-    const btn = toolbar.querySelector(".jaal-finalize");
-    if (!btn || !B) return;
-
-    btn.textContent = _isFinalized ? "Unfinalize" : "Finalize";
-
-    btn.addEventListener("click", function () {
-      const domain      = window.location.hostname;
-      const pathPattern = window.location.pathname.replace(/\/+$/, "") || "/";
-
-      B.storage.local.get("jaal_configs", function (result) {
-        const configs = Array.isArray(result && result.jaal_configs) ? result.jaal_configs : [];
-        // Composite key match: domain + pathPattern + parentSelector
-        const idx = configs.findIndex(function (c) {
-          return c && c.domain === domain
-                  && c.pathPattern === pathPattern
-                  && c.parentSelector === _containerSel;
-        });
-
-        if (_isFinalized && idx >= 0) {
-          configs.splice(idx, 1);
-          _isFinalized = false;
-          btn.textContent = "Finalize";
-          log.info("unfinalized", { phase: "mutate", domain: domain, path: pathPattern });
-        } else {
-          const now = new Date().toISOString();
-          const newId = (typeof crypto !== "undefined" && crypto.randomUUID)
-                          ? crypto.randomUUID()
-                          : ("local-" + Date.now());
-          const entry = {
-            id: idx >= 0 ? configs[idx].id : newId,
-            domain: domain,
-            pathPattern: pathPattern,
-            parentSelector: _containerSel,
-            label: (configs[idx] && configs[idx].label)
-                   || (domain + (pathPattern !== "/" ? pathPattern : "") + " list"),
-            layout: (options && options.layout) || (configs[idx] && configs[idx].layout) || "1D",
-            itemSelector: _itemSel,
-            columns: _columns,
-            pagination: _savedPagination || null,
-            searchInputSelector: (configs[idx] && configs[idx].searchInputSelector) || null,
-            searchInputValue:    (configs[idx] && configs[idx].searchInputValue)    || null,
-            finalizedAt: now,
-            createdAt: (configs[idx] && configs[idx].createdAt) || now,
-          };
-          if (idx >= 0) configs[idx] = entry;
-          else          configs.push(entry);
-          _isFinalized = true;
-          btn.textContent = "Unfinalize";
-          log.info("finalized", { phase: "mutate", domain: domain, path: pathPattern, cols: _columns.length });
-        }
-        B.storage.local.set({ jaal_configs: configs });
-      });
-    });
-  }
-
-  // --- Header buttons ---
-
-  function _setupHeaderButtons(toolbar, container, itemSelector) {
-    const closeBtn   = toolbar.querySelector(".jaal-close");
-    const resetBtn   = toolbar.querySelector(".jaal-reset");
-    const repickBtn  = toolbar.querySelector(".jaal-repick");
-    const detectBtn  = toolbar.querySelector(".jaal-detect");
-    const flattenBtn = toolbar.querySelector(".jaal-flatten");
-    const collapseBtn = toolbar.querySelector(".jaal-collapse");
-
-    if (collapseBtn) {
-      let collapsed = false;
-      collapseBtn.addEventListener("click", function () {
-        collapsed = !collapsed;
-        const body = toolbar.querySelector(".jaal-columns");
-        const status = toolbar.querySelector(".jaal-status");
-        const pagStatus = toolbar.querySelector(".jaal-paginate-status");
-        if (body)      body.style.display      = collapsed ? "none" : "";
-        if (status)    status.style.display    = collapsed ? "none" : "";
-        if (pagStatus) pagStatus.style.display = collapsed ? "none" : "";
-        collapseBtn.textContent = collapsed ? "▲" : "▼";
-      });
-    }
-
-    if (closeBtn) closeBtn.addEventListener("click", function () {
-      destroy();
-      if (_closeCb) _closeCb();
-    });
-
-    if (resetBtn) resetBtn.addEventListener("click", function () {
-      ns.sorter && ns.sorter.resetOrder();
-      ns.sorter && ns.sorter.clearOriginalOrder();
-      _currentSort = { colIndex: -1, direction: null };
-      _filterValues = _filterValues.map(function () { return ""; });
-      _nullStates   = _nullStates.map(function () { return "off"; });
-      toolbar.querySelectorAll(".jaal-sort-btn").forEach(function (b) { b.classList.remove("active"); });
-      toolbar.querySelectorAll(".jaal-filter").forEach(function (inp) { inp.value = ""; inp.disabled = false; });
-      toolbar.querySelectorAll(".jaal-null-btn").forEach(function (b) {
-        b.className = "jaal-null-btn"; b.textContent = "○"; b.title = "Null filter: off";
-      });
-      safeQSA(container, itemSelector).forEach(function (el) { el.style.display = ""; });
-      _updateStatus(toolbar, container, itemSelector);
-      _updateCount(toolbar, container, itemSelector);
-      log.info("reset", { phase: "mutate" });
-    });
-
-    if (repickBtn) repickBtn.addEventListener("click", function () {
-      destroy();
-      if (global.Jaal && typeof global.Jaal.startPicking === "function") {
-        global.Jaal.startPicking();
-      } else if (B) {
-        B.runtime.sendMessage({ type: "jaal-start-pick" });
-      }
-    });
-
-    if (detectBtn) detectBtn.addEventListener("click", async function () {
-      if (!ns.picker || !ns.paginator) return;
-      detectBtn.disabled = true;
-      detectBtn.textContent = "Pick…";
-      try {
-        const { element: pagEl } = await ns.picker.activate({
-          tooltipHeader: "Pick the pagination control",
-          highlightColor: "#8b5cf6",
-        });
-        const config = ns.paginator.detect(pagEl);
-        if (!config) {
-          detectBtn.textContent = "None";
-          detectBtn.disabled = false;
-          return;
-        }
-        _savedPagination = config;
-        detectBtn.style.display = "none";
-        if (flattenBtn) flattenBtn.style.display = "";
-        log.info("pagination_detected", { phase: "load", type: config.type });
-      } catch (_) {
-        detectBtn.textContent = "Detect";
-        detectBtn.disabled = false;
-      }
-    });
-
-    if (flattenBtn) flattenBtn.addEventListener("click", async function () {
-      if (!ns.paginator || !_savedPagination) return;
-      flattenBtn.disabled = true;
-      flattenBtn.textContent = "…";
-
-      let statusEl = toolbar.querySelector(".jaal-paginate-status");
-      if (!statusEl) {
-        statusEl = document.createElement("div");
-        statusEl.className = "jaal-paginate-status";
-        toolbar.appendChild(statusEl);
-      }
-
-      ns.paginator.onProgress(function (info) {
-        statusEl.textContent = "Page " + info.currentPage +
-          (info.totalPages ? " / " + info.totalPages : "") +
-          " — " + info.totalItems + " items";
-      });
-      ns.paginator.onPage(function (info) {
-        // Save resumeState into the flatten button data attr for checkpoint recovery
-        if (info.resumeState) {
-          flattenBtn.setAttribute("data-resume", JSON.stringify(info.resumeState));
-        }
-      });
-      ns.paginator.onComplete(function (info) {
-        flattenBtn.textContent = "Flatten";
-        flattenBtn.disabled = false;
-        statusEl.textContent = "Done — " + info.totalPages + " pages, " + info.totalItems + " items";
-        ns.sorter && ns.sorter.refreshOriginalOrder(container, itemSelector);
-        _updateStatus(toolbar, container, itemSelector);
-        _updateCount(toolbar, container, itemSelector);
-        log.info("flatten_done", { phase: "mutate", pages: info.totalPages, items: info.totalItems });
-      });
-      ns.paginator.onError(function (err) {
-        flattenBtn.textContent = "Resume";
-        flattenBtn.disabled = false;
-        const savedResume = flattenBtn.getAttribute("data-resume");
-        statusEl.textContent = "Paused: " + err.message + (savedResume ? " — click Resume" : "");
-        log.error("flatten_error", { phase: "error", err: err.message });
-      });
-
-      const resumeData = flattenBtn.getAttribute("data-resume");
-      await ns.paginator.startFlatten(container, itemSelector, _savedPagination, {
-        containerSelector: _containerSel,
-        resumeState: resumeData ? JSON.parse(resumeData) : null,
-      });
-    });
-  }
-
-  // --- HTML builder ---
-
-  function _buildColumnRow(col, i, container, itemSelector) {
-    const example = sampleValue(col, container, itemSelector);
-    const ph = (example ? filterHint(col.dataType) + "  e.g. " + example : filterHint(col.dataType));
-    return (
-      "<div class=\"jaal-column\" data-col-index=\"" + i + "\">" +
-      "<span class=\"jaal-col-name\" data-col=\"" + i + "\" title=\"" + escHtml(col.name) + "\">" + escHtml(col.name) + "</span>" +
-      "<button class=\"jaal-sort-btn\" data-col=\"" + i + "\" data-dir=\"asc\" title=\"Sort ▲\">▲</button>" +
-      "<button class=\"jaal-sort-btn\" data-col=\"" + i + "\" data-dir=\"desc\" title=\"Sort ▼\">▼</button>" +
-      "<button class=\"jaal-null-btn\" data-col=\"" + i + "\" title=\"Null filter: off\">○</button>" +
-      "<input class=\"jaal-filter\" data-col=\"" + i + "\" placeholder=\"" + escHtml(ph) + "\" />" +
-      "<button class=\"jaal-dd-btn\" data-col=\"" + i + "\" title=\"Unique values\">▾</button>" +
-      "<button class=\"jaal-hide-btn\" data-col=\"" + i + "\" title=\"Hide column\">✕</button>" +
-      "</div>"
-    );
-  }
-
-  function _buildToolbarHTML(columns, totalItems, container, itemSelector) {
-    const colsHTML = columns.map(function (col, i) {
-      return _buildColumnRow(col, i, container, itemSelector);
-    }).join("");
-
-    return (
-      "<div class=\"jaal-header draggable\">" +
-      "<span class=\"jaal-title\">Jaal</span>" +
-      "<span class=\"jaal-count\">" + totalItems + " items</span>" +
-      "<button class=\"jaal-hbtn jaal-collapse\" title=\"Collapse\">▼</button>" +
-      "<button class=\"jaal-hbtn jaal-detect\" title=\"Detect pagination\">Detect</button>" +
-      "<button class=\"jaal-hbtn jaal-flatten\" title=\"Flatten all pages\" style=\"display:none\">Flatten</button>" +
-      "<button class=\"jaal-hbtn jaal-show-hidden\" title=\"Show hidden columns\" style=\"display:none\">Hidden</button>" +
-      "<button class=\"jaal-hbtn jaal-finalize\" title=\"Save for auto-inject\">" + (_isFinalized ? "Unfinalize" : "Finalize") + "</button>" +
-      "<button class=\"jaal-hbtn jaal-reset\" title=\"Reset sort and filters\">Reset</button>" +
-      "<button class=\"jaal-hbtn jaal-repick\" title=\"Re-pick element\">↺</button>" +
-      "<button class=\"jaal-hbtn jaal-close\" title=\"Close\">✕</button>" +
-      "</div>" +
-      "<div class=\"jaal-columns\">" + colsHTML + "</div>" +
-      "<div class=\"jaal-status\"></div>"
-    );
-  }
-
-  // --- Public API ---
+  // --- Factory: full toolbar ---
 
   function create(analysis, container, itemSelector, totalItems, options) {
-    options        = options || {};
-    _containerSel  = options.containerSelector || null;
-    _itemSel       = itemSelector;
-    _columns       = analysis.columns || [];
-    _savedPagination = options.pagination || null;
-    _isFinalized   = !!(options.finalized);
-    _filterValues  = new Array(_columns.length).fill("");
-    _nullStates    = new Array(_columns.length).fill("off");
-    _hiddenCols    = new Array(_columns.length).fill(false);
-    _currentSort   = { colIndex: -1, direction: null };
-    _activeDropCol = -1;
+    options = options || {};
+
+    // ─── Per-instance state (closure) ───────────────────────────────
+    let _hostEl          = null;
+    let _shadowRoot      = null;
+    let _closeCb         = null;
+    let _currentSort     = { colIndex: -1, direction: null };
+    let _filterValues    = [];
+    let _nullStates      = [];
+    let _hiddenCols      = [];
+    let _activeDropCol   = -1;
+    const _containerSel    = options.containerSelector || null;
+    const _itemSel         = itemSelector;
+    const _columns         = analysis.columns || [];
+    let _savedPagination = options.pagination || null;
+    let _isFinalized     = !!(options.finalized);
+    const _configId        = options.configId || null;
+    const _label           = options.label || "Jaal";
+
+    _filterValues = new Array(_columns.length).fill("");
+    _nullStates   = new Array(_columns.length).fill("off");
+    _hiddenCols   = new Array(_columns.length).fill(false);
+
+    const instance = {
+      destroy: _destroy,
+      onClose: function (cb) { _closeCb = cb; },
+      refresh: _refresh,
+      isLoading: false,
+      configId: _configId,
+      get hostEl() { return _hostEl; },
+    };
+    _instances.push(instance);
+    const _instanceIndex = _instances.length - 1;
+
+    // ─── Host + shadow DOM ──────────────────────────────────────────
+
+    function _createHost(nearElement) {
+      _hostEl = document.createElement("div");
+      _hostEl.style.cssText = "position:fixed;top:" + _stackTop(_instanceIndex) + "px;right:20px;z-index:2147483647";
+      document.body.appendChild(_hostEl);
+
+      _shadowRoot = _hostEl.attachShadow({ mode: "open" });
+      const style = document.createElement("style");
+      style.textContent = TOOLBAR_CSS;
+      _shadowRoot.appendChild(style);
+
+      // Anchor near the picked container if it has room
+      if (nearElement) {
+        try {
+          const rect = nearElement.getBoundingClientRect();
+          // Only override the stack-top placement when the container has
+          // a usable position (right side wide enough)
+          if (rect.right > 0 && rect.left < window.innerWidth) {
+            const top  = Math.max(_stackTop(_instanceIndex), Math.min(rect.top, window.innerHeight - 300));
+            const left = rect.left > window.innerWidth / 2
+              ? Math.max(10, rect.left - 540)
+              : Math.min(rect.right + 16, window.innerWidth - 540);
+            _hostEl.style.top  = top  + "px";
+            _hostEl.style.left = left + "px";
+            _hostEl.style.right = "";
+          }
+        } catch (_) {}
+      }
+    }
+
+    // ─── Drag ───────────────────────────────────────────────────────
+
+    function _setupDrag(headerEl) {
+      if (!headerEl) return;
+      let startX, startY, origLeft, origTop;
+      headerEl.addEventListener("mousedown", function (e) {
+        if (e.target.tagName === "BUTTON" || e.target.tagName === "INPUT") return;
+        e.preventDefault();
+        startX = e.clientX; startY = e.clientY;
+        origLeft = _hostEl.offsetLeft; origTop = _hostEl.offsetTop;
+        document.addEventListener("mousemove", onMove, true);
+        document.addEventListener("mouseup",   onUp,   true);
+      });
+      function onMove(e) {
+        _hostEl.style.left  = Math.max(0, origLeft + (e.clientX - startX)) + "px";
+        _hostEl.style.top   = Math.max(0, origTop  + (e.clientY - startY)) + "px";
+        _hostEl.style.right = "";
+      }
+      function onUp() {
+        document.removeEventListener("mousemove", onMove, true);
+        document.removeEventListener("mouseup",   onUp,   true);
+      }
+    }
+
+    // ─── Status bar / count ─────────────────────────────────────────
+
+    function _updateStatus(toolbar) {
+      const el = toolbar && toolbar.querySelector(".jaal-status");
+      if (!el) return;
+      const all     = safeQSA(container, _itemSel);
+      const visible = all.filter(function (el) { return el.style.display !== "none"; });
+      el.textContent = visible.length + " of " + all.length + " visible";
+    }
+
+    function _updateCount(toolbar) {
+      const el = toolbar && toolbar.querySelector(".jaal-count");
+      if (!el) return;
+      const visible = safeQSA(container, _itemSel).filter(function (e) { return e.style.display !== "none"; });
+      el.textContent = visible.length + " items";
+    }
+
+    // ─── Filters ────────────────────────────────────────────────────
+
+    function _effectiveFilters() {
+      return _filterValues.map(function (fv, i) {
+        if (_nullStates[i] === "non-null") return "?";
+        if (_nullStates[i] === "null-only") return "?!";
+        return fv;
+      });
+    }
+
+    function _applyAllFilters(toolbar) {
+      if (!ns.sorter) return;
+      ns.sorter.applyFilters(container, _itemSel, _columns, _effectiveFilters());
+      _updateStatus(toolbar);
+      _updateCount(toolbar);
+    }
+
+    // ─── Column hover highlight ─────────────────────────────────────
+
+    function _highlightField(col, on) {
+      _ensureHlStyle();
+      const items = safeQSA(container, _itemSel);
+      items.forEach(function (item) {
+        const target = col.selector
+          ? item.querySelector(col.selector.trimStart().startsWith(">") ? ":scope " + col.selector : col.selector)
+          : item;
+        if (target) {
+          if (on) target.classList.add("jaal-field-highlight");
+          else     target.classList.remove("jaal-field-highlight");
+        }
+      });
+    }
+
+    function _setupColHighlight(toolbar) {
+      toolbar.querySelectorAll(".jaal-col-name").forEach(function (nameEl) {
+        const colIdx = parseInt(nameEl.getAttribute("data-col"));
+        const col    = _columns[colIdx];
+        if (!col) return;
+        nameEl.addEventListener("mouseenter", function () {
+          nameEl.classList.add("hl-active");
+          _highlightField(col, true);
+        });
+        nameEl.addEventListener("mouseleave", function () {
+          nameEl.classList.remove("hl-active");
+          _highlightField(col, false);
+        });
+      });
+    }
+
+    // ─── Sample value & dropdown ─────────────────────────────────────
+
+    function sampleValue(col) {
+      const items = safeQSA(container, _itemSel);
+      for (let i = 0; i < Math.min(5, items.length); i++) {
+        const val = ns.sorter && ns.sorter.extractValue(items[i], col.selector, col.attribute);
+        if (val != null && String(val).trim() !== "") {
+          const text = String(val).trim();
+          return text.length > 22 ? text.substring(0, 20) + "…" : text;
+        }
+      }
+      return null;
+    }
+
+    function collectUniqueValues(col) {
+      const items = safeQSA(container, _itemSel);
+      const seen = new Set();
+      const vals = [];
+      for (let i = 0; i < Math.min(200, items.length); i++) {
+        const raw = ns.sorter && ns.sorter.extractValue(items[i], col.selector, col.attribute);
+        const val = raw != null ? String(raw).trim() : null;
+        if (val && !seen.has(val)) { seen.add(val); vals.push(val); }
+        if (vals.length >= 60) break;
+      }
+      return vals.sort(function (a, b) { return a.localeCompare(b, undefined, { numeric: true, sensitivity: "base" }); });
+    }
+
+    function _openDropdown(toolbar, colIdx, ddBtn) {
+      _closeDropdown(toolbar);
+      _activeDropCol = colIdx;
+      ddBtn.classList.add("open");
+
+      const col  = _columns[colIdx];
+      const vals = collectUniqueValues(col);
+
+      const dd = document.createElement("div");
+      dd.className = "jaal-dropdown";
+      dd.setAttribute("data-dd-col", String(colIdx));
+
+      if (vals.length === 0) {
+        const empty = document.createElement("div");
+        empty.className = "jaal-dd-item empty";
+        empty.textContent = "(no values)";
+        dd.appendChild(empty);
+      } else {
+        vals.forEach(function (val) {
+          const item = document.createElement("div");
+          item.className = "jaal-dd-item";
+          item.textContent = val;
+          item.title = val;
+          item.addEventListener("click", function () {
+            const input = toolbar.querySelector(".jaal-filter[data-col=\"" + colIdx + "\"]");
+            if (input) {
+              input.value = val;
+              _filterValues[colIdx] = val;
+              _applyAllFilters(toolbar);
+            }
+            _closeDropdown(toolbar);
+          });
+          dd.appendChild(item);
+        });
+      }
+
+      const btnRect = ddBtn.getBoundingClientRect();
+      dd.style.cssText = "position:fixed;top:" + (btnRect.bottom + 2) + "px;left:" + btnRect.left + "px";
+      _shadowRoot.appendChild(dd);
+
+      setTimeout(function () {
+        document.addEventListener("click", function _ddClose(e) {
+          if (!dd.contains(e.target) && e.target !== ddBtn) {
+            _closeDropdown(toolbar);
+            document.removeEventListener("click", _ddClose, true);
+          }
+        }, true);
+      }, 0);
+    }
+
+    function _closeDropdown(toolbar) {
+      if (!_shadowRoot) return;
+      const existing = _shadowRoot.querySelector(".jaal-dropdown");
+      if (existing) existing.remove();
+      if (_activeDropCol >= 0) {
+        const btn = toolbar && toolbar.querySelector(".jaal-dd-btn[data-col=\"" + _activeDropCol + "\"]");
+        if (btn) btn.classList.remove("open");
+      }
+      _activeDropCol = -1;
+    }
+
+    // ─── Sort / filter / null / dropdown / hide setups ─────────────
+
+    function _setupSort(toolbar) {
+      toolbar.querySelectorAll(".jaal-sort-btn").forEach(function (btn) {
+        btn.addEventListener("click", function () {
+          const colIdx = parseInt(btn.getAttribute("data-col"));
+          const dir    = btn.getAttribute("data-dir");
+          if (_currentSort.colIndex === colIdx && _currentSort.direction === dir) {
+            ns.sorter && ns.sorter.resetOrder();
+            _currentSort = { colIndex: -1, direction: null };
+            toolbar.querySelectorAll(".jaal-sort-btn").forEach(function (b) { b.classList.remove("active"); });
+          } else {
+            _currentSort = { colIndex: colIdx, direction: dir };
+            toolbar.querySelectorAll(".jaal-sort-btn").forEach(function (b) { b.classList.remove("active"); });
+            btn.classList.add("active");
+            ns.sorter && ns.sorter.sortElements(container, _itemSel, _columns[colIdx], dir);
+          }
+          _updateStatus(toolbar);
+        });
+      });
+    }
+
+    function _setupFilters(toolbar) {
+      toolbar.querySelectorAll(".jaal-filter").forEach(function (input) {
+        input.addEventListener("input", function () {
+          _filterValues[parseInt(input.getAttribute("data-col"))] = input.value;
+          _applyAllFilters(toolbar);
+        });
+      });
+    }
+
+    function _setupNullButtons(toolbar) {
+      toolbar.querySelectorAll(".jaal-null-btn").forEach(function (btn) {
+        btn.addEventListener("click", function () {
+          const colIdx = parseInt(btn.getAttribute("data-col"));
+          const cur    = _nullStates[colIdx] || "off";
+          const next   = cur === "off" ? "non-null" : cur === "non-null" ? "null-only" : "off";
+          _nullStates[colIdx] = next;
+          btn.className = "jaal-null-btn" + (next !== "off" ? " " + next : "");
+          btn.title = next === "non-null" ? "Has value" : next === "null-only" ? "Empty only" : "Null filter: off";
+          btn.textContent = next === "non-null" ? "?" : next === "null-only" ? "?!" : "○";
+          const input = toolbar.querySelector(".jaal-filter[data-col=\"" + colIdx + "\"]");
+          if (input) input.disabled = (next !== "off");
+          _applyAllFilters(toolbar);
+        });
+      });
+    }
+
+    function _setupDropdownButtons(toolbar) {
+      toolbar.querySelectorAll(".jaal-dd-btn").forEach(function (btn) {
+        btn.addEventListener("click", function (e) {
+          e.stopPropagation();
+          const colIdx = parseInt(btn.getAttribute("data-col"));
+          if (_activeDropCol === colIdx) { _closeDropdown(toolbar); return; }
+          _openDropdown(toolbar, colIdx, btn);
+        });
+      });
+    }
+
+    function _updateShowHiddenBtn(toolbar) {
+      const hidden = _hiddenCols.filter(Boolean).length;
+      const btn = toolbar.querySelector(".jaal-show-hidden");
+      if (!btn) return;
+      if (hidden === 0) { btn.style.display = "none"; }
+      else { btn.style.display = ""; btn.textContent = "Hidden (" + hidden + ")"; }
+    }
+
+    function _setupHideButtons(toolbar) {
+      toolbar.querySelectorAll(".jaal-hide-btn").forEach(function (btn) {
+        btn.addEventListener("click", function () {
+          const colIdx = parseInt(btn.getAttribute("data-col"));
+          _hiddenCols[colIdx] = true;
+          const row = toolbar.querySelector(".jaal-column[data-col-index=\"" + colIdx + "\"]");
+          if (row) row.style.display = "none";
+          _updateShowHiddenBtn(toolbar);
+          _applyAllFilters(toolbar);
+        });
+      });
+
+      const showBtn = toolbar.querySelector(".jaal-show-hidden");
+      if (showBtn) {
+        showBtn.addEventListener("click", function () {
+          _hiddenCols = _hiddenCols.map(function () { return false; });
+          toolbar.querySelectorAll(".jaal-column").forEach(function (row) { row.style.display = ""; });
+          _updateShowHiddenBtn(toolbar);
+        });
+      }
+    }
+
+    // ─── Finalize button (writes to jaal_configs v2 schema) ────────
+
+    function _setupFinalizeButton(toolbar) {
+      const btn = toolbar.querySelector(".jaal-finalize");
+      if (!btn || !B) return;
+
+      btn.textContent = _isFinalized ? "Unfinalize" : "Finalize";
+
+      btn.addEventListener("click", function () {
+        const domain      = window.location.hostname;
+        const pathPattern = window.location.pathname.replace(/\/+$/, "") || "/";
+
+        B.storage.local.get("jaal_configs", function (result) {
+          const configs = Array.isArray(result && result.jaal_configs) ? result.jaal_configs : [];
+          const idx = configs.findIndex(function (c) {
+            return c && c.domain === domain
+                    && c.pathPattern === pathPattern
+                    && c.parentSelector === _containerSel;
+          });
+
+          if (_isFinalized && idx >= 0) {
+            configs.splice(idx, 1);
+            _isFinalized = false;
+            btn.textContent = "Finalize";
+            log.info && log.info("unfinalized", { phase: "mutate", domain: domain, path: pathPattern });
+          } else {
+            const now = new Date().toISOString();
+            const newId = (typeof crypto !== "undefined" && crypto.randomUUID)
+                            ? crypto.randomUUID()
+                            : ("local-" + Date.now());
+            const entry = {
+              id: idx >= 0 ? configs[idx].id : newId,
+              domain: domain,
+              pathPattern: pathPattern,
+              parentSelector: _containerSel,
+              label: (configs[idx] && configs[idx].label)
+                     || (domain + (pathPattern !== "/" ? pathPattern : "") + " list"),
+              layout: (options && options.layout) || (configs[idx] && configs[idx].layout) || "1D",
+              itemSelector: _itemSel,
+              columns: _columns,
+              pagination: _savedPagination || null,
+              searchInputSelector: (configs[idx] && configs[idx].searchInputSelector) || null,
+              searchInputValue:    (configs[idx] && configs[idx].searchInputValue)    || null,
+              finalizedAt: now,
+              createdAt: (configs[idx] && configs[idx].createdAt) || now,
+            };
+            if (idx >= 0) configs[idx] = entry;
+            else          configs.push(entry);
+            _isFinalized = true;
+            btn.textContent = "Unfinalize";
+            log.info && log.info("finalized", { phase: "mutate", domain: domain, path: pathPattern, cols: _columns.length });
+          }
+          B.storage.local.set({ jaal_configs: configs });
+        });
+      });
+    }
+
+    // ─── Header buttons ─────────────────────────────────────────────
+
+    function _setupHeaderButtons(toolbar) {
+      const closeBtn   = toolbar.querySelector(".jaal-close");
+      const resetBtn   = toolbar.querySelector(".jaal-reset");
+      const repickBtn  = toolbar.querySelector(".jaal-repick");
+      const detectBtn  = toolbar.querySelector(".jaal-detect");
+      const flattenBtn = toolbar.querySelector(".jaal-flatten");
+      const collapseBtn = toolbar.querySelector(".jaal-collapse");
+
+      if (collapseBtn) {
+        let collapsed = false;
+        collapseBtn.addEventListener("click", function () {
+          collapsed = !collapsed;
+          const body = toolbar.querySelector(".jaal-columns");
+          const status = toolbar.querySelector(".jaal-status");
+          const pagStatus = toolbar.querySelector(".jaal-paginate-status");
+          if (body)      body.style.display      = collapsed ? "none" : "";
+          if (status)    status.style.display    = collapsed ? "none" : "";
+          if (pagStatus) pagStatus.style.display = collapsed ? "none" : "";
+          collapseBtn.textContent = collapsed ? "▲" : "▼";
+        });
+      }
+
+      if (closeBtn) closeBtn.addEventListener("click", function () {
+        _destroy();
+        if (_closeCb) _closeCb();
+      });
+
+      if (resetBtn) resetBtn.addEventListener("click", function () {
+        ns.sorter && ns.sorter.resetOrder();
+        ns.sorter && ns.sorter.clearOriginalOrder();
+        _currentSort = { colIndex: -1, direction: null };
+        _filterValues = _filterValues.map(function () { return ""; });
+        _nullStates   = _nullStates.map(function () { return "off"; });
+        toolbar.querySelectorAll(".jaal-sort-btn").forEach(function (b) { b.classList.remove("active"); });
+        toolbar.querySelectorAll(".jaal-filter").forEach(function (inp) { inp.value = ""; inp.disabled = false; });
+        toolbar.querySelectorAll(".jaal-null-btn").forEach(function (b) {
+          b.className = "jaal-null-btn"; b.textContent = "○"; b.title = "Null filter: off";
+        });
+        safeQSA(container, _itemSel).forEach(function (el) { el.style.display = ""; });
+        _updateStatus(toolbar);
+        _updateCount(toolbar);
+        log.info && log.info("reset", { phase: "mutate" });
+      });
+
+      if (repickBtn) repickBtn.addEventListener("click", function () {
+        _destroy();
+        if (global.Jaal && typeof global.Jaal.startPicking === "function") {
+          global.Jaal.startPicking();
+        } else if (B) {
+          B.runtime.sendMessage({ type: "jaal-start-pick" });
+        }
+      });
+
+      if (detectBtn) detectBtn.addEventListener("click", async function () {
+        if (!ns.picker || !ns.paginator) return;
+        detectBtn.disabled = true;
+        detectBtn.textContent = "Pick…";
+        try {
+          const { element: pagEl } = await ns.picker.activate({
+            tooltipHeader: "Pick the pagination control",
+            highlightColor: "#8b5cf6",
+          });
+          const config = ns.paginator.detect(pagEl);
+          if (!config) {
+            detectBtn.textContent = "None";
+            detectBtn.disabled = false;
+            return;
+          }
+          _savedPagination = config;
+          detectBtn.style.display = "none";
+          if (flattenBtn) flattenBtn.style.display = "";
+          log.info && log.info("pagination_detected", { phase: "load", type: config.type });
+        } catch (_) {
+          detectBtn.textContent = "Detect";
+          detectBtn.disabled = false;
+        }
+      });
+
+      if (flattenBtn) flattenBtn.addEventListener("click", async function () {
+        if (!ns.paginator || !_savedPagination) return;
+        flattenBtn.disabled = true;
+        flattenBtn.textContent = "…";
+
+        let statusEl = toolbar.querySelector(".jaal-paginate-status");
+        if (!statusEl) {
+          statusEl = document.createElement("div");
+          statusEl.className = "jaal-paginate-status";
+          toolbar.appendChild(statusEl);
+        }
+
+        ns.paginator.onProgress(function (info) {
+          statusEl.textContent = "Page " + info.currentPage +
+            (info.totalPages ? " / " + info.totalPages : "") +
+            " — " + info.totalItems + " items";
+        });
+        ns.paginator.onPage(function (info) {
+          if (info.resumeState) {
+            flattenBtn.setAttribute("data-resume", JSON.stringify(info.resumeState));
+          }
+        });
+        ns.paginator.onComplete(function (info) {
+          flattenBtn.textContent = "Flatten";
+          flattenBtn.disabled = false;
+          statusEl.textContent = "Done — " + info.totalPages + " pages, " + info.totalItems + " items";
+          ns.sorter && ns.sorter.refreshOriginalOrder(container, _itemSel);
+          _updateStatus(toolbar);
+          _updateCount(toolbar);
+          log.info && log.info("flatten_done", { phase: "mutate", pages: info.totalPages, items: info.totalItems });
+        });
+        ns.paginator.onError(function (err) {
+          flattenBtn.textContent = "Resume";
+          flattenBtn.disabled = false;
+          const savedResume = flattenBtn.getAttribute("data-resume");
+          statusEl.textContent = "Paused: " + err.message + (savedResume ? " — click Resume" : "");
+          log.error && log.error("flatten_error", { phase: "error", err: err.message });
+        });
+
+        const resumeData = flattenBtn.getAttribute("data-resume");
+        await ns.paginator.startFlatten(container, _itemSel, _savedPagination, {
+          containerSelector: _containerSel,
+          resumeState: resumeData ? JSON.parse(resumeData) : null,
+        });
+      });
+    }
+
+    // ─── HTML builder ───────────────────────────────────────────────
+
+    function _buildColumnRow(col, i) {
+      const example = sampleValue(col);
+      const ph = (example ? filterHint(col.dataType) + "  e.g. " + example : filterHint(col.dataType));
+      return (
+        "<div class=\"jaal-column\" data-col-index=\"" + i + "\">" +
+        "<span class=\"jaal-col-name\" data-col=\"" + i + "\" title=\"" + escHtml(col.name) + "\">" + escHtml(col.name) + "</span>" +
+        "<button class=\"jaal-sort-btn\" data-col=\"" + i + "\" data-dir=\"asc\" title=\"Sort ▲\">▲</button>" +
+        "<button class=\"jaal-sort-btn\" data-col=\"" + i + "\" data-dir=\"desc\" title=\"Sort ▼\">▼</button>" +
+        "<button class=\"jaal-null-btn\" data-col=\"" + i + "\" title=\"Null filter: off\">○</button>" +
+        "<input class=\"jaal-filter\" data-col=\"" + i + "\" placeholder=\"" + escHtml(ph) + "\" />" +
+        "<button class=\"jaal-dd-btn\" data-col=\"" + i + "\" title=\"Unique values\">▾</button>" +
+        "<button class=\"jaal-hide-btn\" data-col=\"" + i + "\" title=\"Hide column\">✕</button>" +
+        "</div>"
+      );
+    }
+
+    function _buildToolbarHTML() {
+      const colsHTML = _columns.map(function (col, i) { return _buildColumnRow(col, i); }).join("");
+      return (
+        "<div class=\"jaal-header draggable\">" +
+        "<span class=\"jaal-title\">" + escHtml(_label) + "</span>" +
+        "<span class=\"jaal-count\">" + totalItems + " items</span>" +
+        "<button class=\"jaal-hbtn jaal-collapse\" title=\"Collapse\">▼</button>" +
+        "<button class=\"jaal-hbtn jaal-detect\" title=\"Detect pagination\">Detect</button>" +
+        "<button class=\"jaal-hbtn jaal-flatten\" title=\"Flatten all pages\" style=\"display:none\">Flatten</button>" +
+        "<button class=\"jaal-hbtn jaal-show-hidden\" title=\"Show hidden columns\" style=\"display:none\">Hidden</button>" +
+        "<button class=\"jaal-hbtn jaal-finalize\" title=\"Save for auto-inject\">" + (_isFinalized ? "Unfinalize" : "Finalize") + "</button>" +
+        "<button class=\"jaal-hbtn jaal-reset\" title=\"Reset sort and filters\">Reset</button>" +
+        "<button class=\"jaal-hbtn jaal-repick\" title=\"Re-pick element\">↺</button>" +
+        "<button class=\"jaal-hbtn jaal-close\" title=\"Close\">✕</button>" +
+        "</div>" +
+        "<div class=\"jaal-columns\">" + colsHTML + "</div>" +
+        "<div class=\"jaal-status\"></div>"
+      );
+    }
+
+    // ─── Build + wire ───────────────────────────────────────────────
 
     _createHost(container);
 
     const toolbar = document.createElement("div");
     toolbar.className = "jaal-toolbar";
-    toolbar.innerHTML = _buildToolbarHTML(_columns, totalItems, container, itemSelector);
+    toolbar.innerHTML = _buildToolbarHTML();
     _shadowRoot.appendChild(toolbar);
 
     _setupDrag(toolbar.querySelector(".jaal-header"));
-    _setupSort(toolbar, container, itemSelector);
-    _setupFilters(toolbar, container, itemSelector);
-    _setupNullButtons(toolbar, container, itemSelector);
-    _setupDropdownButtons(toolbar, container, itemSelector);
-    _setupHideButtons(toolbar, container, itemSelector);
-    _setupColHighlight(toolbar, container, itemSelector);
-    _setupHeaderButtons(toolbar, container, itemSelector);
-    _setupFinalizeButton(toolbar, container, itemSelector, options);
+    _setupSort(toolbar);
+    _setupFilters(toolbar);
+    _setupNullButtons(toolbar);
+    _setupDropdownButtons(toolbar);
+    _setupHideButtons(toolbar);
+    _setupColHighlight(toolbar);
+    _setupHeaderButtons(toolbar);
+    _setupFinalizeButton(toolbar);
 
     if (_savedPagination) {
       const detectBtn  = toolbar.querySelector(".jaal-detect");
@@ -775,14 +785,83 @@
       }
     });
     _updateShowHiddenBtn(toolbar);
-    _updateStatus(toolbar, container, itemSelector);
+    _updateStatus(toolbar);
 
-    log.info("toolbar_created", { phase: "init", cols: _columns.length, items: totalItems, finalized: _isFinalized });
-    return _hostEl;
+    function _refresh() {
+      _updateStatus(toolbar);
+      _updateCount(toolbar);
+    }
+
+    function _destroy() {
+      if (_hostEl) { _hostEl.remove(); _hostEl = null; }
+      _shadowRoot = null;
+      const idx = _instances.indexOf(instance);
+      if (idx >= 0) _instances.splice(idx, 1);
+      log.info && log.info("destroyed", { phase: "teardown" });
+    }
+
+    log.info && log.info("toolbar_created", { phase: "init", cols: _columns.length, items: totalItems, finalized: _isFinalized, idx: _instanceIndex });
+    return instance;
   }
 
+  // --- Factory: loading spinner ---
+
   function showLoading(message, nearElement) {
-    _createHost(nearElement);
+    let _hostEl     = null;
+    let _shadowRoot = null;
+    let _closeCb    = null;
+
+    const instance = {
+      isLoading: true,
+      destroy: _destroy,
+      onClose: function (cb) { _closeCb = cb; },
+      refresh: function () {},
+      get hostEl() { return _hostEl; },
+      // Replace this loading instance with a full toolbar in-place
+      upgrade: function (analysis, container, itemSelector, totalItems, options) {
+        _destroy();
+        return create(analysis, container, itemSelector, totalItems, options);
+      },
+      // Show an error message inside the loading panel
+      showError: function (message) {
+        if (!_shadowRoot) return;
+        const existing = _shadowRoot.querySelector(".jaal-loading") ||
+                         _shadowRoot.querySelector(".jaal-columns");
+        if (existing) {
+          const errDiv = document.createElement("div");
+          errDiv.className = "jaal-error";
+          errDiv.textContent = message;
+          existing.replaceWith(errDiv);
+        }
+        log.error && log.error("error_shown", { phase: "error", message: message });
+      },
+    };
+    _instances.push(instance);
+    const _instanceIndex = _instances.length - 1;
+
+    _hostEl = document.createElement("div");
+    _hostEl.style.cssText = "position:fixed;top:" + _stackTop(_instanceIndex) + "px;right:20px;z-index:2147483647";
+    document.body.appendChild(_hostEl);
+    _shadowRoot = _hostEl.attachShadow({ mode: "open" });
+    const style = document.createElement("style");
+    style.textContent = TOOLBAR_CSS;
+    _shadowRoot.appendChild(style);
+
+    if (nearElement) {
+      try {
+        const rect = nearElement.getBoundingClientRect();
+        if (rect.right > 0 && rect.left < window.innerWidth) {
+          const top  = Math.max(_stackTop(_instanceIndex), Math.min(rect.top, window.innerHeight - 300));
+          const left = rect.left > window.innerWidth / 2
+            ? Math.max(10, rect.left - 540)
+            : Math.min(rect.right + 16, window.innerWidth - 540);
+          _hostEl.style.top  = top  + "px";
+          _hostEl.style.left = left + "px";
+          _hostEl.style.right = "";
+        }
+      } catch (_) {}
+    }
+
     const toolbar = document.createElement("div");
     toolbar.className = "jaal-toolbar";
     toolbar.innerHTML =
@@ -796,38 +875,56 @@
       "<span>" + escHtml(message || "Analyzing...") + "</span>" +
       "</div>";
     _shadowRoot.appendChild(toolbar);
-    _setupDrag(toolbar.querySelector(".jaal-header"));
+
+    // Drag for loading panel
+    const headerEl = toolbar.querySelector(".jaal-header");
+    let startX, startY, origLeft, origTop;
+    headerEl.addEventListener("mousedown", function (e) {
+      if (e.target.tagName === "BUTTON") return;
+      e.preventDefault();
+      startX = e.clientX; startY = e.clientY;
+      origLeft = _hostEl.offsetLeft; origTop = _hostEl.offsetTop;
+      document.addEventListener("mousemove", onMove, true);
+      document.addEventListener("mouseup",   onUp,   true);
+    });
+    function onMove(e) {
+      _hostEl.style.left  = Math.max(0, origLeft + (e.clientX - startX)) + "px";
+      _hostEl.style.top   = Math.max(0, origTop  + (e.clientY - startY)) + "px";
+      _hostEl.style.right = "";
+    }
+    function onUp() {
+      document.removeEventListener("mousemove", onMove, true);
+      document.removeEventListener("mouseup",   onUp,   true);
+    }
+
     toolbar.querySelector(".jaal-close").addEventListener("click", function () {
-      destroy();
+      _destroy();
       if (_closeCb) _closeCb();
     });
-    log.info("loading_shown", { phase: "init", message: message });
-  }
 
-  function showError(message) {
-    if (!_shadowRoot) showLoading("");
-    const existing = _shadowRoot.querySelector(".jaal-loading") ||
-                     _shadowRoot.querySelector(".jaal-columns");
-    if (existing) {
-      const errDiv = document.createElement("div");
-      errDiv.className = "jaal-error";
-      errDiv.textContent = message;
-      existing.replaceWith(errDiv);
+    function _destroy() {
+      if (_hostEl) { _hostEl.remove(); _hostEl = null; }
+      _shadowRoot = null;
+      const idx = _instances.indexOf(instance);
+      if (idx >= 0) _instances.splice(idx, 1);
     }
-    log.error("error_shown", { phase: "error", message: message });
+
+    log.info && log.info("loading_shown", { phase: "init", message: message });
+    return instance;
   }
 
-  function destroy() {
-    if (_hlStyleEl) { _hlStyleEl.remove(); _hlStyleEl = null; }
-    if (_hostEl)    { _hostEl.remove();    _hostEl = null; }
-    _shadowRoot = null;
-    log.info("destroyed", { phase: "teardown" });
+  function showError(message, instance) {
+    if (instance && typeof instance.showError === "function") {
+      instance.showError(message);
+      return;
+    }
+    // Fallback: create a transient loading instance and swap in error
+    const inst = showLoading("");
+    inst.showError(message);
   }
 
-  function onClose(cb) { _closeCb = cb; }
+  ns.toolbar = { create, showLoading, showError };
 
-  ns.toolbar = { create, showLoading, showError, destroy, onClose };
-
-  console.log("[Jaal] toolbar loaded");
+  console.log("[Jaal] toolbar loaded (factory mode)");
 
 })(typeof globalThis !== "undefined" ? globalThis : this);
