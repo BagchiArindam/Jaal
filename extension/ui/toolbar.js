@@ -500,11 +500,7 @@
     }
   }
 
-  // --- Finalize / auto-inject ---
-
-  function _finalizationKey() {
-    return window.location.hostname + window.location.pathname.replace(/\/+$/, "");
-  }
+  // --- Finalize / auto-inject (writes to jaal_configs, the v2 schema) ---
 
   function _setupFinalizeButton(toolbar, container, itemSelector, options) {
     const btn = toolbar.querySelector(".jaal-finalize");
@@ -513,27 +509,51 @@
     btn.textContent = _isFinalized ? "Unfinalize" : "Finalize";
 
     btn.addEventListener("click", function () {
-      const key = _finalizationKey();
-      B.storage.local.get("jaal_finalized", function (result) {
-        const store = (result && result["jaal_finalized"]) || {};
-        if (_isFinalized) {
-          delete store[key];
+      const domain      = window.location.hostname;
+      const pathPattern = window.location.pathname.replace(/\/+$/, "") || "/";
+
+      B.storage.local.get("jaal_configs", function (result) {
+        const configs = Array.isArray(result && result.jaal_configs) ? result.jaal_configs : [];
+        // Composite key match: domain + pathPattern + parentSelector
+        const idx = configs.findIndex(function (c) {
+          return c && c.domain === domain
+                  && c.pathPattern === pathPattern
+                  && c.parentSelector === _containerSel;
+        });
+
+        if (_isFinalized && idx >= 0) {
+          configs.splice(idx, 1);
           _isFinalized = false;
           btn.textContent = "Finalize";
-          log.info("unfinalized", { phase: "mutate", key: key });
+          log.info("unfinalized", { phase: "mutate", domain: domain, path: pathPattern });
         } else {
-          store[key] = {
-            urlPattern:        window.location.href,
-            containerSelector: _containerSel,
-            itemSelector:      _itemSel,
-            columns:           _columns,
-            pagination:        _savedPagination || null,
+          const now = new Date().toISOString();
+          const newId = (typeof crypto !== "undefined" && crypto.randomUUID)
+                          ? crypto.randomUUID()
+                          : ("local-" + Date.now());
+          const entry = {
+            id: idx >= 0 ? configs[idx].id : newId,
+            domain: domain,
+            pathPattern: pathPattern,
+            parentSelector: _containerSel,
+            label: (configs[idx] && configs[idx].label)
+                   || (domain + (pathPattern !== "/" ? pathPattern : "") + " list"),
+            layout: (options && options.layout) || (configs[idx] && configs[idx].layout) || "1D",
+            itemSelector: _itemSel,
+            columns: _columns,
+            pagination: _savedPagination || null,
+            searchInputSelector: (configs[idx] && configs[idx].searchInputSelector) || null,
+            searchInputValue:    (configs[idx] && configs[idx].searchInputValue)    || null,
+            finalizedAt: now,
+            createdAt: (configs[idx] && configs[idx].createdAt) || now,
           };
+          if (idx >= 0) configs[idx] = entry;
+          else          configs.push(entry);
           _isFinalized = true;
           btn.textContent = "Unfinalize";
-          log.info("finalized", { phase: "mutate", key: key, cols: _columns.length });
+          log.info("finalized", { phase: "mutate", domain: domain, path: pathPattern, cols: _columns.length });
         }
-        B.storage.local.set({ "jaal_finalized": store });
+        B.storage.local.set({ jaal_configs: configs });
       });
     });
   }

@@ -58,11 +58,94 @@ function migrateFromSortSight() {
   });
 }
 
-// Run migration on install/update
+// ─── Data migration v2 (jaal_finalized object → jaal_configs array) ──────
+
+function migrateToConfigsV2() {
+  B.storage.local.get(["jaal_migration_v2_done", "jaal_finalized", "jaal_configs"], function (result) {
+    if (result.jaal_migration_v2_done) {
+      console.log(LOG_TAG, "v2 migration already completed");
+      return;
+    }
+
+    const old = (result && result.jaal_finalized) || {};
+    const configs = Array.isArray(result && result.jaal_configs) ? result.jaal_configs : [];
+    let migrated = 0;
+
+    for (const key in old) {
+      const entry = old[key];
+      if (!entry || !entry.containerSelector) continue;
+
+      const slashIdx = key.indexOf("/");
+      const domain = slashIdx >= 0 ? key.substring(0, slashIdx) : key;
+      const path   = slashIdx >= 0 ? key.substring(slashIdx)    : "/";
+
+      const dupe = configs.find(function (c) {
+        return c.domain === domain
+            && c.pathPattern === path
+            && c.parentSelector === entry.containerSelector;
+      });
+      if (dupe) continue;
+
+      configs.push({
+        id: (typeof crypto !== "undefined" && crypto.randomUUID)
+              ? crypto.randomUUID()
+              : ("legacy-" + Date.now() + "-" + migrated),
+        domain: domain,
+        pathPattern: path,
+        parentSelector: entry.containerSelector,
+        label: domain + " — auto-migrated",
+        layout: "1D",
+        itemSelector: entry.itemSelector || "",
+        columns: entry.columns || [],
+        pagination: entry.pagination || null,
+        searchInputSelector: null,
+        searchInputValue: null,
+        finalizedAt: new Date(0).toISOString(),
+        createdAt: new Date(0).toISOString(),
+      });
+      migrated++;
+    }
+
+    B.storage.local.set({ jaal_configs: configs, jaal_migration_v2_done: true });
+    console.log(LOG_TAG, "v2 migration: copied " + migrated + " entries from jaal_finalized → jaal_configs");
+  });
+}
+
+// Run migrations on install/update
 if (B.runtime && B.runtime.onInstalled) {
   B.runtime.onInstalled.addListener(migrateFromSortSight);
+  B.runtime.onInstalled.addListener(migrateToConfigsV2);
 }
 migrateFromSortSight();
+migrateToConfigsV2();
+
+// ─── URL glob matcher (inlined from shared/url-glob.js) ──────────────────
+
+const _globCache = Object.create(null);
+function _globToRegex(glob) {
+  let r = "^";
+  for (let i = 0; i < glob.length; i++) {
+    const c = glob[i];
+    if (c === "*") {
+      if (glob[i + 1] === "*") { r += ".*"; i++; }
+      else                     { r += "[^/]*"; }
+    } else if ("\\^$.|?+()[]{}".indexOf(c) >= 0) {
+      r += "\\" + c;
+    } else {
+      r += c;
+    }
+  }
+  return new RegExp(r + "$");
+}
+function _globMatches(glob, path) {
+  if (typeof glob !== "string" || typeof path !== "string") return false;
+  if (glob === "" || glob === "*" || glob === "**") return true;
+  if (!_globCache[glob]) {
+    try { _globCache[glob] = _globToRegex(glob); }
+    catch (_) { return false; }
+  }
+  return _globCache[glob].test(path);
+}
 
 // ─── Context menus ──────────────────────────────────────────────────────────
 
@@ -182,38 +265,31 @@ function _injectFiles(tabId, files, activateMsg) {
   }
 }
 
-// ─── Auto-inject: check finalized configs on tab load ───────────────────────
+// ─── Auto-inject: match jaal_configs on tab load ────────────────────────
 
 B.tabs.onUpdated.addListener(function (tabId, changeInfo, tab) {
   if (changeInfo.status !== "complete" || !tab.url || tab.url.startsWith("chrome")) return;
 
-  B.storage.local.get("jaal_finalized", function (result) {
-    const store = (result && result["jaal_finalized"]) || {};
-    const keys  = Object.keys(store);
-    if (keys.length === 0) return;
+  let url;
+  try { url = new URL(tab.url); } catch (_) { return; }
 
-    let url;
-    try { url = new URL(tab.url); } catch (_) { return; }
-    const tabKey = url.hostname + url.pathname.replace(/\/+$/, "");
+  B.storage.local.get("jaal_configs", function (result) {
+    const configs = Array.isArray(result && result.jaal_configs) ? result.jaal_configs : [];
+    if (configs.length === 0) return;
 
-    // Exact key match first, then check stored urlPattern prefix
-    let config = store[tabKey];
-    if (!config) {
-      for (const k of keys) {
-        const c = store[k];
-        if (c.urlPattern && tab.url.startsWith(c.urlPattern.split("?")[0])) {
-          config = c;
-          break;
-        }
-      }
-    }
-    if (!config) return;
+    const path = url.pathname.replace(/\/+$/, "") || "/";
+    const matches = configs.filter(function (c) {
+      if (!c || !c.domain || !c.parentSelector) return false;
+      if (c.domain !== url.hostname) return false;
+      return _globMatches(c.pathPattern || "*", path)
+          || _globMatches(c.pathPattern || "*", url.pathname);
+    });
+    if (matches.length === 0) return;
 
-    console.log(LOG_TAG, "auto-inject for", tab.url);
+    console.log(LOG_TAG, "auto-inject for", tab.url, "—", matches.length, "config(s) matched");
     _injectFiles(tabId, PICKER_FILES, null);
-    // After inject, send auto-activate with the saved config
     setTimeout(function () {
-      B.tabs.sendMessage(tabId, { type: "jaal-auto-activate", config: config });
+      B.tabs.sendMessage(tabId, { type: "jaal-auto-activate-multi", configs: matches });
     }, 500);
   });
 });

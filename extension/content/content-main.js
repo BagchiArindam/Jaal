@@ -61,10 +61,38 @@
       startPicking();
 
     } else if (msg.type === "jaal-auto-activate") {
+      // Legacy single-config message (kept for backward compatibility).
       log.info("auto_activate", { phase: "mutate", url: msg.config && msg.config.urlPattern });
       autoActivate(msg.config);
+
+    } else if (msg.type === "jaal-auto-activate-multi") {
+      // New: bg sends an array of jaal_configs entries that match this URL.
+      // Tier 3 will spawn one toolbar per matching config; until then the
+      // singleton toolbar means we can only show the first whose parent is
+      // present in the DOM.
+      const configs = Array.isArray(msg.configs) ? msg.configs : [];
+      log.info("auto_activate_multi", { phase: "mutate", count: configs.length });
+      for (let i = 0; i < configs.length; i++) {
+        const cfg = configs[i];
+        if (!cfg || !cfg.parentSelector) continue;
+        if (!document.querySelector(cfg.parentSelector)) continue;
+        autoActivate(_configToLegacyShape(cfg));
+        break;
+      }
     }
   });
+
+  // Adapter: convert a Tier-2 jaal_configs entry into the legacy shape that
+  // _tryAutoActivate / autoActivate expect.
+  function _configToLegacyShape(cfg) {
+    return {
+      containerSelector: cfg.parentSelector,
+      itemSelector:      cfg.itemSelector,
+      columns:           cfg.columns || [],
+      pagination:        cfg.pagination || null,
+      urlPattern:        (cfg.domain || "") + (cfg.pathPattern || ""),
+    };
+  }
 
   // --- Picker orchestration ---
 
