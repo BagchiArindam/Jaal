@@ -30,8 +30,12 @@
   const B = typeof browser !== "undefined" ? browser : chrome;
   const hasExtStorage = !!(B && B.storage && B.storage.local);
 
-  const log = (window.Jaal && window.Jaal.makeLogger)
-    ? window.Jaal.makeLogger("skeleton-overlay")
+  // Firefox content scripts: window !== globalThis. shared/ files all register
+  // on globalThis, so we must read/write through the same root.
+  const _root = (typeof globalThis !== "undefined") ? globalThis : window;
+
+  const log = (_root.Jaal && _root.Jaal.makeLogger)
+    ? _root.Jaal.makeLogger("skeleton-overlay")
     : console;
 
   // In-memory mirror of persistent state (filled by loadState on first show)
@@ -123,10 +127,10 @@
   // ─── inspection ──────────────────────────────────────────────────────────
 
   function runInspection() {
-    if (!window.Jaal || !window.Jaal.skeleton) {
+    if (!_root.Jaal || !_root.Jaal.skeleton) {
       throw new Error("Jaal.skeleton not loaded — shared/skeleton.js should be injected first");
     }
-    const result = window.Jaal.skeleton.inspect(document.body, settings);
+    const result = _root.Jaal.skeleton.inspect(document.body, settings);
     // Persist into results history (cap at MAX_RESULTS_STORED)
     storedResults.unshift({
       url: result.url,
@@ -350,7 +354,7 @@
     removeOverlay();
   }
 
-  window.Jaal = window.Jaal || {};
-  window.Jaal.skeletonOverlay = { show, hide };
+  _root.Jaal = _root.Jaal || {};
+  _root.Jaal.skeletonOverlay = { show, hide };
   console.log("[Jaal] skeleton-overlay loaded");
 })();

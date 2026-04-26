@@ -63,15 +63,24 @@ console.log(`[build-firefox] copied ${copied} entries + manifest.v2.json → man
 console.log(`[build-firefox] wrote ${path.relative(ROOT, OUT_DIR)}/`);
 console.log("");
 
-// Build .xpi using web-ext
+// Build .xpi using web-ext (rename .zip → .xpi so Firefox accepts it)
 import { execSync } from "child_process";
+let xpiPath = null;
 try {
-  console.log("[build-firefox] building .xpi with web-ext...");
+  console.log("[build-firefox] building extension package with web-ext...");
   execSync(`npx web-ext build --source-dir "${OUT_DIR}" --artifacts-dir "${ROOT}" --overwrite-dest`, {
     stdio: "inherit",
     cwd: ROOT
   });
-  console.log(`[build-firefox] ✓ wrote ${path.relative(ROOT, ROOT)}/dist-firefox.xpi`);
+  // web-ext outputs as <name>-<version>.zip; rename to dist-firefox.xpi for stable path
+  const zipFiles = fs.readdirSync(ROOT).filter(f => f.startsWith("jaal-") && f.endsWith(".zip"));
+  if (zipFiles.length > 0) {
+    const zipFile = path.join(ROOT, zipFiles[0]);
+    xpiPath = path.join(ROOT, "dist-firefox.xpi");
+    if (fs.existsSync(xpiPath)) fs.rmSync(xpiPath);
+    fs.renameSync(zipFile, xpiPath);
+    console.log(`[build-firefox] ✓ wrote dist-firefox.xpi`);
+  }
 } catch (err) {
   console.warn("[build-firefox] web-ext build failed (xpi production skipped)");
   console.warn("[build-firefox] make sure web-ext is installed: npm install --save-dev web-ext");
@@ -82,4 +91,4 @@ console.log("");
 console.log("Install in Firefox Developer Edition:");
 console.log("  1. about:config → xpinstall.signatures.required = false");
 console.log("  2. about:addons → gear icon → Install Add-on from File");
-console.log(`  3. Select ${path.relative(ROOT, ROOT).replace(/\\/g, "/")}/dist-firefox.xpi`);
+console.log(`  3. Select D:/Dev/Jaal/dist-firefox.xpi`);

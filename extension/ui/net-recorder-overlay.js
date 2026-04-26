@@ -22,14 +22,17 @@
 (function () {
   "use strict";
 
-  if (window.__jaalNetRecorderOverlayLoaded) {
+  // Firefox content scripts: window !== globalThis. Use globalThis to share Jaal.
+  const _root = (typeof globalThis !== "undefined") ? globalThis : window;
+
+  if (_root.__jaalNetRecorderOverlayLoaded) {
     console.log("[Jaal net-recorder-overlay] already loaded — skipping");
     return;
   }
-  window.__jaalNetRecorderOverlayLoaded = true;
+  _root.__jaalNetRecorderOverlayLoaded = true;
 
-  const log = (window.Jaal && window.Jaal.makeLogger)
-    ? window.Jaal.makeLogger("net-recorder-overlay")
+  const log = (_root.Jaal && _root.Jaal.makeLogger)
+    ? _root.Jaal.makeLogger("net-recorder-overlay")
     : { info: console.log, warn: console.warn, error: console.error, debug: console.log };
 
   // ─── State ───────────────────────────────────────────────────────────────
@@ -163,7 +166,7 @@
 
   closeEl.addEventListener("click", function () {
     host.remove();
-    window.__jaalNetRecorderOverlayLoaded = false;
+    _root.__jaalNetRecorderOverlayLoaded = false;
     log.info("panel_closed", { phase: "teardown" });
   });
 
@@ -296,12 +299,12 @@
 
   btnGenerate.addEventListener("click", function () {
     if (!diffCalls.length) { setStatus("No calls to replay yet."); return; }
-    if (!window.Jaal || !window.Jaal.NetReplayer) {
+    if (!_root.Jaal || !_root.Jaal.NetReplayer) {
       setStatus("⚠ NetReplayer module not available.");
       log.error("generate_failed", { phase: "error", reason: "NetReplayer missing" });
       return;
     }
-    const script = window.Jaal.NetReplayer.generateScript(diffCalls, {
+    const script = _root.Jaal.NetReplayer.generateScript(diffCalls, {
       label: "Jaal replayer — " + window.location.hostname,
     });
     const blob = new Blob([script], { type: "text/javascript" });
@@ -371,8 +374,8 @@
 
   // ─── Expose + init ───────────────────────────────────────────────────────
 
-  window.Jaal = window.Jaal || {};
-  window.Jaal.netRecorderOverlay = {
+  _root.Jaal = _root.Jaal || {};
+  _root.Jaal.netRecorderOverlay = {
     show: function () { host.style.display = ""; },
     hide: function () { host.style.display = "none"; },
   };

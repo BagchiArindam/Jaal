@@ -16,18 +16,23 @@
 (function () {
   "use strict";
 
-  if (window.__jaalContentMainLoaded) {
+  // CRITICAL: In Firefox content scripts, window !== globalThis.
+  // shared/ files all use globalThis, so we must too — otherwise we see a
+  // separate empty Jaal namespace and Jaal.picker (etc) appears undefined.
+  const _root = (typeof globalThis !== "undefined") ? globalThis : window;
+
+  if (_root.__jaalContentMainLoaded) {
     console.log("[Jaal content-main] already loaded — re-registering message listener");
     // Don't skip; re-register the listener in case a new UI was injected
   } else {
-    window.__jaalContentMainLoaded = true;
+    _root.__jaalContentMainLoaded = true;
   }
 
-  const Jaal = (window.Jaal = window.Jaal || {});
+  const Jaal = (_root.Jaal = _root.Jaal || {});
   const log  = Jaal.makeLogger ? Jaal.makeLogger("content-main") : console;
   const B    = typeof browser !== "undefined" ? browser : chrome;
 
-  console.log("[Jaal content-main] initializing, Jaal namespace ready");
+  console.log("[Jaal content-main] initializing, Jaal namespace ready, Jaal keys:", Object.keys(Jaal).join(","));
 
   // --- Message routing ---
 
