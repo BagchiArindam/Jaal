@@ -212,7 +212,165 @@
     return { layout: layout, items: items, itemSelector: itemSelector };
   }
 
-  ns.htmlExtractor = { extractMinimalHTML, analyzeParent, unwrapToRepeatingItems };
+  // ─── buildSyntheticSuperItem ─────────────────────────────────────────────
+  //
+  // Given a list of repeating items (from analyzeParent), walk every item's
+  // leaf nodes, group by a (tag + classes + attribute) signature, and emit a
+  // single synthetic HTML element that contains one representative node per
+  // unique leaf signature. This is the "union of all fields ever observed
+  // across any item" — so a list where item A has a discount badge and item
+  // B has an out-of-stock badge yields a super-item with BOTH fields.
+  //
+  // Sending this single synthetic item to the AI analyzer (instead of 2-3
+  // random samples) eliminates "missing fields" caused by sampling and saves
+  // tokens. Returns { html, fieldCount, itemCount, leaves }.
+
+  function _classesOf(el) {
+    if (!el || typeof el.className !== "string") return [];
+    return el.className.trim().split(/\s+/)
+      .filter(function (c) { return c && !c.startsWith("jaal-"); })
+      .slice(0, 3);
+  }
+
+  function _detectDataType(value, attribute) {
+    if (attribute === "src") return "image";
+    if (attribute === "href") return "url";
+    if (attribute === "datetime") return "date";
+    if (!value) return "text";
+    const v = String(value).trim();
+    if (/^[$£€¥₹]\s?-?\d/.test(v) || /-?\d+([.,]\d+)?\s?[$£€¥₹]/.test(v)) return "currency";
+    if (/^\d{4}-\d{2}-\d{2}/.test(v))           return "date";
+    if (/^\d{1,2}\/\d{1,2}\/\d{2,4}/.test(v))   return "date";
+    if (/^-?\d+(\.\d+)?$/.test(v))              return "number";
+    if (/^\d+(\.\d+)?\s*(out of|\/)\s*\d+/.test(v.toLowerCase())) return "rating";
+    return "text";
+  }
+
+  // Walk an item's tree, emit { tag, classes, attribute, value } for each leaf
+  function _gatherLeaves(itemRoot) {
+    const leaves = [];
+    function visit(node) {
+      if (!node || node.nodeType !== 1) return;
+      const tag = node.tagName.toLowerCase();
+
+      if (tag === "img") {
+        const src = node.getAttribute("src");
+        if (src) leaves.push({ tag: "img", classes: _classesOf(node), attribute: "src", value: src });
+        return;
+      }
+      if (tag === "input" || tag === "textarea") {
+        const v = node.value || node.getAttribute("value");
+        if (v) leaves.push({ tag: tag, classes: _classesOf(node), attribute: "value", value: v });
+        return;
+      }
+      if (tag === "time") {
+        const dt = node.getAttribute("datetime");
+        if (dt) leaves.push({ tag: "time", classes: _classesOf(node), attribute: "datetime", value: dt });
+        return;
+      }
+      if (tag === "a" && node.children.length === 0) {
+        const href = node.getAttribute("href");
+        const text = (node.textContent || "").trim();
+        if (text) leaves.push({ tag: "a", classes: _classesOf(node), attribute: null, value: text });
+        else if (href) leaves.push({ tag: "a", classes: _classesOf(node), attribute: "href", value: href });
+        return;
+      }
+      // Element with no element children → text leaf if it has text
+      if (node.children.length === 0) {
+        const text = (node.textContent || "").trim();
+        if (text) leaves.push({ tag: tag, classes: _classesOf(node), attribute: null, value: text });
+        return;
+      }
+      // Branch — recurse
+      for (const child of node.children) visit(child);
+    }
+    visit(itemRoot);
+    return leaves;
+  }
+
+  function _signature(leaf) {
+    return leaf.tag + "|" + leaf.classes.join(".") + "|" + (leaf.attribute || "");
+  }
+
+  function buildSyntheticSuperItem(items) {
+    if (!Array.isArray(items) || items.length === 0) {
+      return { html: "<div class=\"jaal-super-item\"></div>", fieldCount: 0, itemCount: 0, leaves: [] };
+    }
+    const bySig = new Map();
+    for (const item of items) {
+      const leaves = _gatherLeaves(item);
+      for (const leaf of leaves) {
+        const sig = _signature(leaf);
+        if (!bySig.has(sig)) {
+          bySig.set(sig, {
+            tag: leaf.tag,
+            classes: leaf.classes,
+            attribute: leaf.attribute,
+            values: [],
+            count: 0,
+          });
+        }
+        const e = bySig.get(sig);
+        e.count++;
+        if (leaf.value && e.values.length < 3 && e.values.indexOf(leaf.value) < 0) {
+          e.values.push(leaf.value);
+        }
+      }
+    }
+
+    const fields = [];
+    const htmlParts = [];
+    for (const e of bySig.values()) {
+      const cls = e.classes.length ? " class=\"" + e.classes.join(" ").replace(/"/g, "&quot;") + "\"" : "";
+      const sample = e.values[0] || "";
+      const dataType = _detectDataType(sample, e.attribute);
+      // Build representative HTML node
+      let nodeHtml;
+      if (e.attribute === "src" || e.attribute === "href" || e.attribute === "datetime" || e.attribute === "value") {
+        const safeVal = String(sample).replace(/"/g, "&quot;").substring(0, 200);
+        if (e.tag === "img") {
+          nodeHtml = "<img" + cls + " src=\"" + safeVal + "\" />";
+        } else {
+          nodeHtml = "<" + e.tag + cls + " " + e.attribute + "=\"" + safeVal + "\"></" + e.tag + ">";
+        }
+      } else {
+        const safeText = String(sample).replace(/[<>&]/g, function (c) {
+          return c === "<" ? "&lt;" : c === ">" ? "&gt;" : "&amp;";
+        }).substring(0, 200);
+        nodeHtml = "<" + e.tag + cls + ">" + safeText + "</" + e.tag + ">";
+      }
+      htmlParts.push(nodeHtml);
+
+      // Build a CSS selector for this field (used as fallback if AI doesn't supply one)
+      let sel = e.tag;
+      if (e.classes.length) {
+        try { sel += "." + e.classes.map(function (c) { return CSS.escape(c); }).join("."); }
+        catch (_) { sel += "." + e.classes.join("."); }
+      }
+      fields.push({
+        selector: sel,
+        attribute: e.attribute,
+        dataType: dataType,
+        sampleValues: e.values.slice(),
+        occurrenceFraction: e.count / items.length,
+      });
+    }
+
+    const html = "<div class=\"jaal-super-item\">" + htmlParts.join("") + "</div>";
+
+    console.log("[Jaal.htmlExtractor] buildSyntheticSuperItem —",
+      "items=" + items.length,
+      "uniqueFields=" + fields.length);
+
+    return { html: html, fieldCount: fields.length, itemCount: items.length, leaves: fields };
+  }
+
+  ns.htmlExtractor = {
+    extractMinimalHTML,
+    analyzeParent,
+    unwrapToRepeatingItems,
+    buildSyntheticSuperItem,
+  };
   console.log("[Jaal] html-extractor loaded");
 
 })(typeof globalThis !== "undefined" ? globalThis : this);

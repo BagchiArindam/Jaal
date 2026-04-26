@@ -139,8 +139,42 @@
   async function analyzeAndBuildToolbar(containerEl, hintEl, loadingInst) {
     const containerSelector = buildSelector(containerEl);
 
-    let metadata, samples;
-    if (Jaal.htmlExtractor && Jaal.htmlExtractor.extractMinimalHTML) {
+    let metadata, samples, parentAnalysis = null, superItem = null;
+    if (Jaal.htmlExtractor
+        && Jaal.htmlExtractor.analyzeParent
+        && Jaal.htmlExtractor.buildSyntheticSuperItem) {
+      // New flow (Tier 5): walk every item's leaves, send a single synthetic
+      // super-item to the AI so missing-field cases are eliminated.
+      parentAnalysis = Jaal.htmlExtractor.analyzeParent(containerEl);
+      superItem = Jaal.htmlExtractor.buildSyntheticSuperItem(parentAnalysis.items);
+
+      if (superItem.fieldCount > 0) {
+        samples = [superItem.html];
+        metadata = {
+          url: window.location.href,
+          containerTag: containerEl.tagName.toLowerCase(),
+          containerClasses: containerEl.className || "",
+          containerId: containerEl.id || "",
+          totalItems: parentAnalysis.items.length,
+          itemSelector: parentAnalysis.itemSelector,
+          layout: parentAnalysis.layout,
+          fieldCount: superItem.fieldCount,
+          superItem: true,
+        };
+        log.info("super_item_built", {
+          phase: "load",
+          items: parentAnalysis.items.length,
+          fields: superItem.fieldCount,
+          layout: parentAnalysis.layout,
+        });
+      } else {
+        // Fallback to legacy random-sample flow if super-item produced no fields
+        log.warn("super_item_empty_fallback", { phase: "load" });
+        const extracted = Jaal.htmlExtractor.extractMinimalHTML(containerEl, 3, hintEl);
+        metadata = extracted.metadata;
+        samples  = extracted.samples;
+      }
+    } else if (Jaal.htmlExtractor && Jaal.htmlExtractor.extractMinimalHTML) {
       const extracted = Jaal.htmlExtractor.extractMinimalHTML(containerEl, 3, hintEl);
       metadata = extracted.metadata;
       samples  = extracted.samples;
@@ -163,6 +197,12 @@
       }
 
       const analysis = response.data;
+      // Prefer the deterministic itemSelector from analyzeParent — the server
+      // only saw the synthetic super-item and can't infer the real DOM's
+      // repeating-unit selector.
+      if (parentAnalysis && parentAnalysis.itemSelector) {
+        analysis.itemSelector = parentAnalysis.itemSelector;
+      }
       const validation = validateAnalysis(containerEl, analysis);
       if (!validation.valid) {
         if (loadingInst) loadingInst.showError("Analysis failed: " + validation.reason + ". Try selecting a different element.");
