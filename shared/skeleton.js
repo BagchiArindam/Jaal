@@ -174,11 +174,82 @@
     };
   }
 
+  // ─── collectVisualBlocks ─────────────────────────────────────────────────
+  //
+  // Walk the live DOM from `root` and return an array of visible, block-shaped
+  // elements with their bounding rects and short class/id labels.
+  // Used by skeleton-overlay.js for Overlay and Panel visual modes.
+  //
+  // Returns: [ { x, y, w, h, label, depth } ]  (up to ~400 entries)
+
+  const BLOCK_MIN_W = 60;
+  const BLOCK_MIN_H = 30;
+  const BLOCK_MAX = 400;
+
+  // Depth-to-colour palette (hue only; overlay uses HSLA)
+  const DEPTH_HUES = [210, 150, 30, 0, 270, 180, 60, 300];
+
+  function collectVisualBlocks(root) {
+    const target = root || document.body;
+    const blocks = [];
+    const viewW = (typeof window !== "undefined" ? window.innerWidth  : 1280);
+    const viewH = (typeof window !== "undefined" ? window.innerHeight : 800);
+
+    function walk(el, depth) {
+      if (!el || el.nodeType !== 1) return;
+      if (blocks.length >= BLOCK_MAX) return;
+      const tag = el.tagName;
+      if (SKIP_TAGS.has(tag)) return;
+
+      let rect;
+      try { rect = el.getBoundingClientRect(); } catch (_) { return; }
+
+      // Skip invisible or off-screen elements
+      if (rect.width < 1 || rect.height < 1) return;
+      if (rect.bottom < -viewH || rect.top > viewH * 2) return;
+      if (rect.right < 0 || rect.left > viewW * 2)      return;
+
+      try {
+        const cs = (el.ownerDocument && el.ownerDocument.defaultView || window).getComputedStyle(el);
+        if (cs.display === "none" || cs.visibility === "hidden") return;
+        if (parseFloat(cs.opacity) < 0.01) return;
+      } catch (_) {}
+
+      // Only emit this element if it meets the size threshold
+      if (rect.width >= BLOCK_MIN_W && rect.height >= BLOCK_MIN_H) {
+        const id  = el.id ? "#" + el.id : "";
+        const cls = Array.from(el.classList)
+          .filter(function (c) { return c && !c.startsWith("jaal-"); })
+          .slice(0, 3)
+          .map(function (c) { return "." + c; })
+          .join("");
+        blocks.push({
+          x:     Math.round(rect.left),
+          y:     Math.round(rect.top),
+          w:     Math.round(rect.width),
+          h:     Math.round(rect.height),
+          label: tag.toLowerCase() + id + cls,
+          depth: depth,
+          hue:   DEPTH_HUES[depth % DEPTH_HUES.length],
+        });
+      }
+
+      for (var i = 0; i < el.children.length; i++) {
+        walk(el.children[i], depth + 1);
+      }
+    }
+
+    walk(target, 0);
+    return blocks;
+  }
+
   ns.skeleton = {
     inspect,
+    collectVisualBlocks,
     SKIP_TAGS,
     MAX_DEPTH_DEFAULT,
     COLLAPSE_THRESHOLD_DEFAULT,
+    DEPTH_HUES,
   };
   console.log("[Jaal] skeleton loaded");
 
