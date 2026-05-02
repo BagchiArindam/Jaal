@@ -246,6 +246,7 @@
     const _label           = options.label || "Jaal";
     let _searchInputSelector = options.searchInputSelector || null;
     let _searchInputValue    = options.searchInputValue    || "";
+    const _runId             = options.runId || null;
 
     _filterValues = new Array(_columns.length).fill("");
     _nullStates   = new Array(_columns.length).fill("off");
@@ -639,12 +640,24 @@
     }
 
     function _setupSettings(toolbar) {
-      const toggleBtn = toolbar.querySelector(".jaal-settings-toggle");
-      const panel     = toolbar.querySelector(".jaal-settings");
-      const selEl     = toolbar.querySelector(".jaal-search-sel");
-      const pickBtn   = toolbar.querySelector(".jaal-search-pick");
-      const clearBtn  = toolbar.querySelector(".jaal-search-clear");
-      const valInput  = toolbar.querySelector(".jaal-search-value");
+      const toggleBtn  = toolbar.querySelector(".jaal-settings-toggle");
+      const panel      = toolbar.querySelector(".jaal-settings");
+      const selEl      = toolbar.querySelector(".jaal-search-sel");
+      const pickBtn    = toolbar.querySelector(".jaal-search-pick");
+      const clearBtn   = toolbar.querySelector(".jaal-search-clear");
+      const valInput   = toolbar.querySelector(".jaal-search-value");
+      const copyRunId  = toolbar.querySelector(".jaal-copy-runid");
+
+      if (copyRunId && _runId) {
+        copyRunId.addEventListener("click", function () {
+          try {
+            navigator.clipboard.writeText(_runId).then(function () {
+              copyRunId.textContent = "✓";
+              setTimeout(function () { copyRunId.textContent = "📋"; }, 1200);
+            });
+          } catch (_) {}
+        });
+      }
 
       if (toggleBtn && panel) {
         toggleBtn.addEventListener("click", function () {
@@ -899,6 +912,13 @@
     function _buildSettingsHTML() {
       const sel = _searchInputSelector || "";
       const val = _searchInputValue || "";
+      const runIdRow = _runId
+        ? "<div class=\"jaal-set-row\">" +
+            "<span class=\"jaal-set-label\">Debug runId:</span>" +
+            "<span class=\"jaal-set-value\" title=\"" + escHtml(_runId) + "\" style=\"font-size:10px\">" + escHtml(_runId) + "</span>" +
+            "<button class=\"jaal-set-btn jaal-copy-runid\" title=\"Copy runId to clipboard\">📋</button>" +
+          "</div>"
+        : "";
       return (
         "<div class=\"jaal-settings\" style=\"display:none\">" +
           "<div class=\"jaal-set-row\">" +
@@ -911,6 +931,7 @@
             "<span class=\"jaal-set-label\">Search value:</span>" +
             "<input class=\"jaal-search-value\" placeholder=\"text auto-typed into search bar on load\" value=\"" + escHtml(val) + "\" />" +
           "</div>" +
+          runIdRow +
         "</div>"
       );
     }

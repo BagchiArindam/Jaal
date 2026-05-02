@@ -4,11 +4,19 @@ Prompts written fresh for Jaal — preserves the output schema contract from
 sort-sight's analyzer.py (itemSelector/columns, pagination type + selectors)
 but re-phrases the instructions. Schema stability matters; wording does not.
 """
+import json
+import os
+import random
+import string
+from datetime import datetime, timezone
+
 from html_cleaner import clean_html
 from logger import make_logger
 from providers import get_provider
 
 log = make_logger("analyzer")
+
+_DEBUG_DIR = os.path.join(os.path.dirname(__file__), ".debug")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -23,6 +31,10 @@ COLUMN_SYSTEM_PROMPT = (
 
 COLUMN_USER_TEMPLATE = """Container: <{container_tag} class="{container_classes}">
 Direct children: {total_children}, dominant child tag: <{dominant_tag}>{grid_note}
+
+Note: the input sample below is a SYNTHETIC union element whose direct children are
+representative leaf nodes from ALL real repeating items. It is NOT a real item.
+Selectors you return must match elements inside ONE real item, not the synthetic root div.
 
 Below are {sample_count} representative item samples. Return a JSON object shaped as:
 
@@ -52,6 +64,8 @@ Selector rules (these have all been bug sources — follow them carefully):
   and selector "" with attribute "href" for its URL.
 - If a column's value lives directly on the item (no nested element), use selector "" and
   pick the appropriate attribute.
+- Each column's selector (if non-empty) should match EXACTLY ONE element per real item.
+  Use the data-jaal-path attribute hints on nodes to understand what path they came from.
 
 Data-type guidance:
 - Money/prices → "currency", sortDefault "asc"
@@ -109,6 +123,98 @@ Selector rules:
 Return the JSON object only."""
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Debug artifact helpers
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _generate_run_id() -> str:
+    ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    suffix = "".join(random.choices(string.ascii_lowercase + string.digits, k=6))
+    return f"ana_{ts}_{suffix}"
+
+
+def _write_debug_artifacts(
+    run_id: str,
+    system_prompt: str,
+    user_prompt: str,
+    metadata: dict,
+    samples: list,
+    result: dict,
+) -> None:
+    try:
+        run_dir = os.path.join(_DEBUG_DIR, run_id)
+        os.makedirs(run_dir, exist_ok=True)
+
+        if samples:
+            with open(os.path.join(run_dir, "super-element.html"), "w", encoding="utf-8") as f:
+                f.write(samples[0])
+
+        with open(os.path.join(run_dir, "metadata.json"), "w", encoding="utf-8") as f:
+            json.dump(metadata, f, indent=2, default=str)
+
+        url = metadata.get("url", "")
+        with open(os.path.join(run_dir, "url.txt"), "w", encoding="utf-8") as f:
+            f.write(url)
+
+        with open(os.path.join(run_dir, "prompt.txt"), "w", encoding="utf-8") as f:
+            f.write("=== SYSTEM ===\n")
+            f.write(system_prompt)
+            f.write("\n\n=== USER ===\n")
+            f.write(user_prompt)
+
+        with open(os.path.join(run_dir, "parsed.json"), "w", encoding="utf-8") as f:
+            json.dump(result, f, indent=2, default=str)
+
+        index_path = os.path.join(_DEBUG_DIR, "index.jsonl")
+        parts = url.split("/")
+        domain = parts[2] if len(parts) > 2 else ""
+        summary = {
+            "ts": datetime.now(timezone.utc).isoformat(),
+            "runId": run_id,
+            "url": url,
+            "domain": domain,
+            "fieldCount": metadata.get("fieldCount", 0),
+            "columnCount": len(result.get("columns", [])),
+            "status": "ok",
+        }
+        with open(index_path, "a", encoding="utf-8") as f:
+            f.write(json.dumps(summary) + "\n")
+
+        _prune_debug(index_path, max_entries=500)
+
+    except Exception as exc:
+        log.warning("debug_write_failed", phase="error", err=str(exc))
+
+
+def _prune_debug(index_path: str, max_entries: int = 500) -> None:
+    try:
+        if not os.path.exists(index_path):
+            return
+        with open(index_path, "r", encoding="utf-8") as f:
+            lines = f.readlines()
+        if len(lines) <= max_entries:
+            return
+        to_remove = lines[: len(lines) - max_entries]
+        to_keep = lines[len(lines) - max_entries :]
+        for line in to_remove:
+            try:
+                entry = json.loads(line.strip())
+                run_dir = os.path.join(_DEBUG_DIR, entry.get("runId", ""))
+                if os.path.isdir(run_dir):
+                    import shutil
+                    shutil.rmtree(run_dir, ignore_errors=True)
+            except Exception:
+                pass
+        with open(index_path, "w", encoding="utf-8") as f:
+            f.writelines(to_keep)
+    except Exception as exc:
+        log.warning("debug_prune_failed", phase="error", err=str(exc))
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Column detection
+# ─────────────────────────────────────────────────────────────────────────────
+
 def _build_column_prompt(metadata: dict, samples: list[str]) -> str:
     cleaned = [clean_html(s) for s in samples]
     samples_text = "\n\n".join(
@@ -140,11 +246,13 @@ def _build_column_prompt(metadata: dict, samples: list[str]) -> str:
 
 
 def analyze(metadata: dict, samples: list[str]) -> dict:
+    run_id = _generate_run_id()
     user_message = _build_column_prompt(metadata, samples)
     provider = get_provider()
     log.info(
         "analyze_start",
         phase="mutate",
+        runId=run_id,
         provider=provider.name,
         model=provider.model,
         promptChars=len(user_message),
@@ -154,9 +262,12 @@ def analyze(metadata: dict, samples: list[str]) -> dict:
     log.info(
         "analyze_done",
         phase="mutate",
+        runId=run_id,
         columnCount=len(result.get("columns", [])),
         itemSelector=result.get("itemSelector"),
     )
+    _write_debug_artifacts(run_id, COLUMN_SYSTEM_PROMPT, user_message, metadata, samples, result)
+    result["runId"] = run_id
     return result
 
 
