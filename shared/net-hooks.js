@@ -10,20 +10,21 @@
  *   hooks.stop();                 // restore originals
  *   const calls = hooks.getAndClear();   // get recorded + clear buffer
  *   const calls = hooks.snapshot();      // get without clearing
+ *   hooks.pushAction(obj)         // push a user-action event from the overlay
  *
  * Recorded call object:
- *   { id, type: "fetch"|"xhr"|"websocket", url, method, headers, bodyPreview,
- *     status, responseHeaders, responsePreview, ts, error }
+ *   { id, type: "fetch"|"xhr"|"websocket"|"action"|"transform",
+ *     url, method, headers, body, bodyEncoding, contentType,
+ *     status, responseHeaders, responseBody, responseEncoding, ts, error }
  * WebSocket calls additionally have: { frames: [{dir:"in"|"out", data, ts}] }
- *
- * Ported from lib-sortsight-js/net-hooks.js — exposure moved to window.Jaal.NetHooks.
+ * Action calls: { eventType, target, value, key, ts }
+ * Transform calls: { fn, argPreview, returnPreview, stack, ts }
  */
 (function (global) {
   "use strict";
 
   const ns = (global.Jaal = global.Jaal || {});
 
-  // Resolve correct window — unsafeWindow in Tampermonkey context, window otherwise
   const _w =
     typeof unsafeWindow !== "undefined"
       ? unsafeWindow
@@ -31,10 +32,15 @@
       ? window
       : global;
 
+  const BODY_CAP        = 1024 * 1024; // 1 MB body capture
+  const FRAME_CAP       = 500;         // chars per WS frame preview
+  const TRANSFORM_CAP   = 1024;        // chars per transform arg/return
+  const ACTION_VAL_CAP  = 200;         // chars per action value
+
   function _truncate(str, n) {
     if (str === null || str === undefined) return "";
     const s = typeof str === "string" ? str : _safeStringify(str);
-    return s.length > n ? s.substring(0, n) + "…" : s;
+    return s.length > n ? s.substring(0, n) + "…[truncated]" : s;
   }
 
   function _safeStringify(val) {
@@ -49,7 +55,7 @@
     const obj = {};
     try {
       if (h instanceof Headers) {
-        h.forEach((v, k) => { obj[k] = v; });
+        h.forEach(function (v, k) { obj[k] = v; });
       } else if (h && typeof h === "object") {
         Object.assign(obj, h);
       }
@@ -57,26 +63,56 @@
     return obj;
   }
 
+  // Encode a body as string, noting whether it was truncated.
+  // Returns { body: string, bodyEncoding: "utf8"|"truncated" }
+  function _encodeBody(raw, contentType) {
+    if (raw === null || raw === undefined || raw === "") return { body: "", bodyEncoding: "utf8" };
+    const str = _safeStringify(raw);
+    if (str.length > BODY_CAP) {
+      return { body: str.substring(0, BODY_CAP), bodyEncoding: "truncated" };
+    }
+    const ct = (contentType || "").toLowerCase();
+    const isText = ct.includes("json") || ct.includes("text") || ct.includes("xml") ||
+                   ct.includes("javascript") || ct.includes("form");
+    return { body: str, bodyEncoding: isText ? "utf8" : "base64" };
+  }
+
+  // Capture a short stack line for transform hooks (skip our own frames).
+  function _callerLine() {
+    try {
+      const lines = new Error().stack.split("\n");
+      for (var i = 2; i < Math.min(lines.length, 8); i++) {
+        var line = lines[i].trim();
+        if (line && !line.includes("net-hooks")) return line;
+      }
+      return lines[2] || "";
+    } catch (_) { return ""; }
+  }
+
   function create(opts) {
-    const maxBuffer = (opts && opts.maxBuffer) || 500;
-    const bodyPreviewLen = (opts && opts.bodyPreviewLen) || 500;
-    const responsePreviewLen = (opts && opts.responsePreviewLen) || 1000;
+    const maxBuffer   = (opts && opts.maxBuffer)   || 500;
     const maxWsFrames = (opts && opts.maxWsFrames) || 100;
 
-    let calls = [];
+    let calls  = [];
     let active = false;
-    let _seq = 0;
+    let _seq   = 0;
 
-    const _origFetch = _w.fetch ? _w.fetch.bind(_w) : null;
-    const _origXhrOpen = _w.XMLHttpRequest.prototype.open;
-    const _origXhrSend = _w.XMLHttpRequest.prototype.send;
-    const _origXhrSetHeader = _w.XMLHttpRequest.prototype.setRequestHeader;
-    const _origWS = _w.WebSocket;
+    const _origFetch            = _w.fetch ? _w.fetch.bind(_w) : null;
+    const _origXhrOpen          = _w.XMLHttpRequest.prototype.open;
+    const _origXhrSend          = _w.XMLHttpRequest.prototype.send;
+    const _origXhrSetHeader     = _w.XMLHttpRequest.prototype.setRequestHeader;
+    const _origWS               = _w.WebSocket;
+    const _origBtoa             = _w.btoa;
+    const _origAtob             = _w.atob;
+    const _origJsonStringify    = _w.JSON && _w.JSON.stringify;
+    const _origEncodeURIComponent = _w.encodeURIComponent;
 
     function _push(call) {
       if (calls.length >= maxBuffer) calls.shift();
       calls.push(call);
     }
+
+    // ─── fetch ────────────────────────────────────────────────────────
 
     function _installFetch() {
       if (!_origFetch) return;
@@ -88,31 +124,32 @@
             : input instanceof URL ? input.href
             : (input && input.url) || String(input);
         } catch (_) {}
-        const method = (init && init.method)
-          || (input && typeof input === "object" && input.method)
-          || "GET";
+        const method  = (init && init.method) || (input && typeof input === "object" && input.method) || "GET";
         const headers = _headersToObj((init && init.headers) || (input && typeof input === "object" && input.headers));
-        const bodyPreview = _truncate(_safeStringify(init && init.body), bodyPreviewLen);
+        const ct      = headers["content-type"] || headers["Content-Type"] || "";
+        const enc     = _encodeBody(init && init.body, ct);
 
-        const call = { id, type: "fetch", url, method, headers, bodyPreview, ts: Date.now() };
+        const call = { id, type: "fetch", url, method, headers,
+                       body: enc.body, bodyEncoding: enc.bodyEncoding, contentType: ct,
+                       ts: Date.now() };
         _push(call);
         console.log("[Jaal.NetHooks] fetch", method, url);
 
         return _origFetch(input, init).then(
-          (resp) => {
-            call.status = resp.status;
-            call.statusText = resp.statusText;
+          function (resp) {
+            call.status         = resp.status;
+            call.statusText     = resp.statusText;
             call.responseHeaders = _headersToObj(resp.headers);
-            const ct = resp.headers.get("content-type") || "";
-            if (ct.includes("json") || ct.includes("text")) {
-              return resp.clone().text().then((text) => {
-                call.responsePreview = _truncate(text, responsePreviewLen);
-                return resp;
-              }).catch(() => resp);
-            }
-            return resp;
+            const rct           = resp.headers.get("content-type") || "";
+            call.responseContentType = rct;
+            return resp.clone().text().then(function (text) {
+              const re = _encodeBody(text, rct);
+              call.responseBody     = re.body;
+              call.responseEncoding = re.bodyEncoding;
+              return resp;
+            }).catch(function () { return resp; });
           },
-          (err) => {
+          function (err) {
             call.error = String(err);
             console.error("[Jaal.NetHooks] fetch error", url, err);
             throw err;
@@ -121,17 +158,17 @@
       };
     }
 
-    function _uninstallFetch() {
-      if (_origFetch) _w.fetch = _origFetch;
-    }
+    function _uninstallFetch() { if (_origFetch) _w.fetch = _origFetch; }
+
+    // ─── XHR ─────────────────────────────────────────────────────────
 
     function _installXhr() {
-      _w.XMLHttpRequest.prototype.open = function (method, url, ...rest) {
-        this._nh_id = ++_seq;
-        this._nh_method = String(method).toUpperCase();
-        this._nh_url = String(url);
+      _w.XMLHttpRequest.prototype.open = function (method, url) {
+        this._nh_id      = ++_seq;
+        this._nh_method  = String(method).toUpperCase();
+        this._nh_url     = String(url);
         this._nh_headers = {};
-        return _origXhrOpen.call(this, method, url, ...rest);
+        return _origXhrOpen.apply(this, arguments);
       };
 
       _w.XMLHttpRequest.prototype.setRequestHeader = function (k, v) {
@@ -140,25 +177,28 @@
       };
 
       _w.XMLHttpRequest.prototype.send = function (body) {
+        const ct  = (this._nh_headers && (this._nh_headers["content-type"] || this._nh_headers["Content-Type"])) || "";
+        const enc = _encodeBody(body, ct);
         const call = {
           id: this._nh_id || ++_seq,
           type: "xhr",
-          url: this._nh_url || "",
+          url: this._nh_url  || "",
           method: this._nh_method || "GET",
           headers: this._nh_headers || {},
-          bodyPreview: _truncate(_safeStringify(body), bodyPreviewLen),
+          body: enc.body, bodyEncoding: enc.bodyEncoding, contentType: ct,
           ts: Date.now(),
         };
         _push(call);
         console.log("[Jaal.NetHooks] xhr", call.method, call.url);
 
         this.addEventListener("loadend", function () {
-          call.status = this.status;
-          call.statusText = this.statusText;
-          const ct = this.getResponseHeader && this.getResponseHeader("content-type") || "";
-          if (ct.includes("json") || ct.includes("text")) {
-            call.responsePreview = _truncate(this.responseText, responsePreviewLen);
-          }
+          call.status         = this.status;
+          call.statusText     = this.statusText;
+          const rct           = (this.getResponseHeader && this.getResponseHeader("content-type")) || "";
+          call.responseContentType = rct;
+          const re            = _encodeBody(this.responseText, rct);
+          call.responseBody   = re.body;
+          call.responseEncoding = re.bodyEncoding;
         });
 
         return _origXhrSend.call(this, body);
@@ -166,55 +206,104 @@
     }
 
     function _uninstallXhr() {
-      _w.XMLHttpRequest.prototype.open = _origXhrOpen;
-      _w.XMLHttpRequest.prototype.send = _origXhrSend;
+      _w.XMLHttpRequest.prototype.open             = _origXhrOpen;
+      _w.XMLHttpRequest.prototype.send             = _origXhrSend;
       _w.XMLHttpRequest.prototype.setRequestHeader = _origXhrSetHeader;
     }
 
+    // ─── WebSocket ────────────────────────────────────────────────────
+
     function _installWs() {
       if (!_origWS) return;
-
       function PatchedWebSocket(url, protocols) {
         const ws = protocols !== undefined ? new _origWS(url, protocols) : new _origWS(url);
-        const wsCall = {
-          id: ++_seq,
-          type: "websocket",
-          url: String(url),
-          ts: Date.now(),
-          frames: [],
-        };
+        const wsCall = { id: ++_seq, type: "websocket", url: String(url), ts: Date.now(), frames: [] };
         _push(wsCall);
         console.log("[Jaal.NetHooks] WebSocket", url);
 
-        ws.addEventListener("message", (evt) => {
+        ws.addEventListener("message", function (evt) {
           if (wsCall.frames.length < maxWsFrames) {
-            wsCall.frames.push({ dir: "in", data: _truncate(String(evt.data), 200), ts: Date.now() });
+            wsCall.frames.push({ dir: "in", data: _truncate(String(evt.data), FRAME_CAP), ts: Date.now() });
           }
         });
-
         const _origWsSend = ws.send.bind(ws);
         ws.send = function (data) {
           if (wsCall.frames.length < maxWsFrames) {
-            wsCall.frames.push({ dir: "out", data: _truncate(String(data), 200), ts: Date.now() });
+            wsCall.frames.push({ dir: "out", data: _truncate(String(data), FRAME_CAP), ts: Date.now() });
           }
           return _origWsSend(data);
         };
-
         return ws;
       }
-
       PatchedWebSocket.prototype = _origWS.prototype;
       Object.setPrototypeOf(PatchedWebSocket, _origWS);
       PatchedWebSocket.CONNECTING = _origWS.CONNECTING;
-      PatchedWebSocket.OPEN = _origWS.OPEN;
-      PatchedWebSocket.CLOSING = _origWS.CLOSING;
-      PatchedWebSocket.CLOSED = _origWS.CLOSED;
-
+      PatchedWebSocket.OPEN       = _origWS.OPEN;
+      PatchedWebSocket.CLOSING    = _origWS.CLOSING;
+      PatchedWebSocket.CLOSED     = _origWS.CLOSED;
       _w.WebSocket = PatchedWebSocket;
     }
 
-    function _uninstallWs() {
-      if (_origWS) _w.WebSocket = _origWS;
+    function _uninstallWs() { if (_origWS) _w.WebSocket = _origWS; }
+
+    // ─── Transform hooks ──────────────────────────────────────────────
+
+    function _installTransforms() {
+      if (_origBtoa) {
+        _w.btoa = function (s) {
+          const r = _origBtoa.call(_w, s);
+          _push({ id: ++_seq, type: "transform", fn: "btoa",
+                  argPreview: _truncate(String(s), TRANSFORM_CAP),
+                  returnPreview: _truncate(r, TRANSFORM_CAP),
+                  stack: _callerLine(), ts: Date.now() });
+          return r;
+        };
+      }
+      if (_origAtob) {
+        _w.atob = function (s) {
+          const r = _origAtob.call(_w, s);
+          _push({ id: ++_seq, type: "transform", fn: "atob",
+                  argPreview: _truncate(String(s), TRANSFORM_CAP),
+                  returnPreview: _truncate(r, TRANSFORM_CAP),
+                  stack: _callerLine(), ts: Date.now() });
+          return r;
+        };
+      }
+      if (_origEncodeURIComponent) {
+        _w.encodeURIComponent = function (s) {
+          const r = _origEncodeURIComponent.call(_w, s);
+          if (String(s).length > 8) {
+            _push({ id: ++_seq, type: "transform", fn: "encodeURIComponent",
+                    argPreview: _truncate(String(s), TRANSFORM_CAP),
+                    returnPreview: _truncate(r, TRANSFORM_CAP),
+                    stack: _callerLine(), ts: Date.now() });
+          }
+          return r;
+        };
+      }
+      // Only record JSON.stringify when applied to non-trivial objects (likely request payloads)
+      if (_origJsonStringify) {
+        _w.JSON.stringify = function (val) {
+          const r = _origJsonStringify.apply(_w.JSON, arguments);
+          if (val && typeof val === "object" && !Array.isArray(val)) {
+            const keys = Object.keys(val);
+            if (keys.length >= 1 && keys.length <= 20) {
+              _push({ id: ++_seq, type: "transform", fn: "JSON.stringify",
+                      argPreview: _truncate(r, TRANSFORM_CAP),
+                      returnPreview: "",
+                      stack: _callerLine(), ts: Date.now() });
+            }
+          }
+          return r;
+        };
+      }
+    }
+
+    function _uninstallTransforms() {
+      if (_origBtoa)                _w.btoa                = _origBtoa;
+      if (_origAtob)                _w.atob                = _origAtob;
+      if (_origEncodeURIComponent)  _w.encodeURIComponent  = _origEncodeURIComponent;
+      if (_origJsonStringify)       _w.JSON.stringify       = _origJsonStringify;
     }
 
     return {
@@ -224,7 +313,8 @@
         _installFetch();
         _installXhr();
         _installWs();
-        console.log("[Jaal.NetHooks] installed (fetch + XHR + WebSocket). maxBuffer=" + maxBuffer);
+        _installTransforms();
+        console.log("[Jaal.NetHooks] installed (fetch + XHR + WebSocket + transforms). maxBuffer=" + maxBuffer);
       },
 
       stop() {
@@ -233,20 +323,19 @@
         _uninstallFetch();
         _uninstallXhr();
         _uninstallWs();
+        _uninstallTransforms();
         console.log("[Jaal.NetHooks] uninstalled — captured", calls.length, "calls");
       },
 
-      isActive() { return active; },
+      isActive()    { return active; },
+      getAndClear() { const copy = [...calls]; calls = []; return copy; },
+      snapshot()    { return [...calls]; },
+      clear()       { calls = []; },
 
-      getAndClear() {
-        const copy = [...calls];
-        calls = [];
-        return copy;
+      // Called by net-recorder-main.js to push user-action events from DOM listeners
+      pushAction(actionCall) {
+        _push(Object.assign({ id: ++_seq }, actionCall));
       },
-
-      snapshot() { return [...calls]; },
-
-      clear() { calls = []; },
     };
   }
 
