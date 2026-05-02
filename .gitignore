@@ -37,6 +37,7 @@ extension/manifest - Copy*.json
 # Server runtime state
 server/.cache/
 server/.runs/
+server/.debug/
 server/*.log
 
 # Editors / OS
