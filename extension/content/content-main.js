@@ -197,12 +197,28 @@
       }
 
       const analysis = response.data;
+
+      // Echo runId to console so the diagnostician can find the debug artifacts
+      const runId = analysis.runId || null;
+      if (runId) console.log("[Jaal] runId=" + runId);
+      delete analysis.runId;
+
       // Prefer the deterministic itemSelector from analyzeParent — the server
       // only saw the synthetic super-item and can't infer the real DOM's
       // repeating-unit selector.
       if (parentAnalysis && parentAnalysis.itemSelector) {
         analysis.itemSelector = parentAnalysis.itemSelector;
       }
+
+      // Validate each AI-returned column selector against real items.
+      // If a selector matches 0 or >1 elements per card, substitute the
+      // deterministic fallbackSelector recorded during super-item construction.
+      if (superItem && superItem.leaves && superItem.leaves.length > 0) {
+        analysis.columns = (analysis.columns || []).map(function (col) {
+          return _validateOrFallbackColumn(col, containerEl, analysis.itemSelector, superItem.leaves);
+        });
+      }
+
       const validation = validateAnalysis(containerEl, analysis);
       if (!validation.valid) {
         if (loadingInst) loadingInst.showError("Analysis failed: " + validation.reason + ". Try selecting a different element.");
@@ -211,20 +227,21 @@
 
       if (Jaal.toolbar) {
         const key = "manual-" + (++_manualCounter);
+        const toolbarOpts = { containerSelector: containerSelector, label: "Jaal · pick", configId: key, runId: runId };
         const inst = (loadingInst && loadingInst.upgrade)
           ? loadingInst.upgrade(
               { columns: validation.columns, itemSelector: analysis.itemSelector },
               containerEl,
               analysis.itemSelector,
               validation.itemCount,
-              { containerSelector: containerSelector, label: "Jaal · pick", configId: key }
+              toolbarOpts
             )
           : Jaal.toolbar.create(
               { columns: validation.columns, itemSelector: analysis.itemSelector },
               containerEl,
               analysis.itemSelector,
               validation.itemCount,
-              { containerSelector: containerSelector, label: "Jaal · pick", configId: key }
+              toolbarOpts
             );
         Jaal._activeToolbars.set(key, inst);
         inst.onClose(function () {
@@ -238,6 +255,51 @@
     } catch (err) {
       handleAnalysisError(err.message, loadingInst);
     }
+  }
+
+  // Validate an AI-returned column selector against real items in the DOM.
+  // If a selector matches 0 or >1 elements per item, substitute the
+  // deterministic fallbackSelector recorded during super-item construction.
+  function _validateOrFallbackColumn(col, container, itemSel, superLeaves) {
+    if (!col || (!col.selector && col.selector !== "")) return col;
+    if (col.selector === "") return col; // "" means the item itself — always valid
+
+    const safeSel = col.selector.trimStart().startsWith(">")
+      ? ":scope " + col.selector
+      : col.selector;
+    const safeItemSel = itemSel && itemSel.trimStart().startsWith(">")
+      ? ":scope " + itemSel
+      : itemSel;
+
+    const sampleItems = Array.from(container.querySelectorAll(safeItemSel)).slice(0, 5);
+    if (sampleItems.length === 0) return col;
+
+    const matchCounts = sampleItems.map(function (item) {
+      try { return item.querySelectorAll(safeSel).length; } catch (_) { return 0; }
+    });
+    const allExactlyOne = matchCounts.every(function (n) { return n === 1; });
+    if (allExactlyOne) return col; // AI's selector is valid
+
+    // Find the best-matching super-item leaf by class overlap
+    const colClasses = (col.selector.match(/\.[\w-]+/g) || []).map(function (c) { return c.slice(1); });
+    let bestLeaf = null;
+    let bestScore = 0;
+    for (var i = 0; i < superLeaves.length; i++) {
+      var leaf = superLeaves[i];
+      if (!leaf.fallbackSelector) continue;
+      var leafClasses = (leaf.selector.match(/\.[\w-]+/g) || []).map(function (c) { return c.slice(1); });
+      var shared = colClasses.filter(function (c) { return leafClasses.indexOf(c) >= 0; }).length;
+      if (shared > bestScore) { bestScore = shared; bestLeaf = leaf; }
+    }
+
+    if (bestLeaf && bestLeaf.fallbackSelector && bestScore > 0) {
+      console.warn("[Jaal] column '" + col.name + "': AI selector '" + col.selector +
+                   "' matched " + matchCounts + " — using fallback '" + bestLeaf.fallbackSelector + "'");
+      return Object.assign({}, col, { selector: bestLeaf.fallbackSelector });
+    }
+    console.warn("[Jaal] column '" + col.name + "': AI selector '" + col.selector +
+                 "' matched " + matchCounts + " — no fallback found, keeping AI selector");
+    return col;
   }
 
   function validateAnalysis(container, analysis) {

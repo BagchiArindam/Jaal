@@ -246,45 +246,66 @@
     return "text";
   }
 
-  // Walk an item's tree, emit { tag, classes, attribute, value } for each leaf
+  // Build one CSS selector step for an element (tag + first 2 non-jaal classes).
+  function _pathStep(node) {
+    const tag = node.tagName.toLowerCase();
+    const classes = _classesOf(node);
+    if (!classes.length) return tag;
+    try {
+      return tag + "." + classes.map(function (c) { return CSS.escape(c); }).join(".");
+    } catch (_) {
+      return tag + "." + classes.join(".");
+    }
+  }
+
+  // Walk an item's tree, emit { tag, classes, attribute, value, fallbackSelector } for each leaf.
+  // fallbackSelector is a :scope-relative path usable to re-find this leaf inside a real item.
   function _gatherLeaves(itemRoot) {
     const leaves = [];
-    function visit(node) {
+    // relParts = CSS steps from itemRoot's direct children down to (and including) current node.
+    // Empty means current node IS the itemRoot (selector = "" = the item itself).
+    function visit(node, relParts) {
       if (!node || node.nodeType !== 1) return;
       const tag = node.tagName.toLowerCase();
 
+      const fallbackSelector = relParts.length === 0
+        ? ""
+        : ":scope > " + relParts.join(" > ");
+
       if (tag === "img") {
         const src = node.getAttribute("src");
-        if (src) leaves.push({ tag: "img", classes: _classesOf(node), attribute: "src", value: src });
+        if (src) leaves.push({ tag: "img", classes: _classesOf(node), attribute: "src", value: src, fallbackSelector: fallbackSelector });
         return;
       }
       if (tag === "input" || tag === "textarea") {
         const v = node.value || node.getAttribute("value");
-        if (v) leaves.push({ tag: tag, classes: _classesOf(node), attribute: "value", value: v });
+        if (v) leaves.push({ tag: tag, classes: _classesOf(node), attribute: "value", value: v, fallbackSelector: fallbackSelector });
         return;
       }
       if (tag === "time") {
         const dt = node.getAttribute("datetime");
-        if (dt) leaves.push({ tag: "time", classes: _classesOf(node), attribute: "datetime", value: dt });
+        if (dt) leaves.push({ tag: "time", classes: _classesOf(node), attribute: "datetime", value: dt, fallbackSelector: fallbackSelector });
         return;
       }
       if (tag === "a" && node.children.length === 0) {
         const href = node.getAttribute("href");
         const text = (node.textContent || "").trim();
-        if (text) leaves.push({ tag: "a", classes: _classesOf(node), attribute: null, value: text });
-        else if (href) leaves.push({ tag: "a", classes: _classesOf(node), attribute: "href", value: href });
+        if (text) leaves.push({ tag: "a", classes: _classesOf(node), attribute: null, value: text, fallbackSelector: fallbackSelector });
+        else if (href) leaves.push({ tag: "a", classes: _classesOf(node), attribute: "href", value: href, fallbackSelector: fallbackSelector });
         return;
       }
       // Element with no element children → text leaf if it has text
       if (node.children.length === 0) {
         const text = (node.textContent || "").trim();
-        if (text) leaves.push({ tag: tag, classes: _classesOf(node), attribute: null, value: text });
+        if (text) leaves.push({ tag: tag, classes: _classesOf(node), attribute: null, value: text, fallbackSelector: fallbackSelector });
         return;
       }
-      // Branch — recurse
-      for (const child of node.children) visit(child);
+      // Branch — recurse into children, extending the path
+      for (const child of node.children) {
+        visit(child, relParts.concat([_pathStep(child)]));
+      }
     }
-    visit(itemRoot);
+    visit(itemRoot, []);
     return leaves;
   }
 
@@ -306,6 +327,7 @@
             tag: leaf.tag,
             classes: leaf.classes,
             attribute: leaf.attribute,
+            fallbackSelector: leaf.fallbackSelector || "",
             values: [],
             count: 0,
           });
@@ -324,24 +346,26 @@
       const cls = e.classes.length ? " class=\"" + e.classes.join(" ").replace(/"/g, "&quot;") + "\"" : "";
       const sample = e.values[0] || "";
       const dataType = _detectDataType(sample, e.attribute);
+      // data-jaal-path stamps the DOM path so AI can use it as a selector hint
+      const dataPath = " data-jaal-path=\"" + (e.fallbackSelector || "").replace(/"/g, "&quot;") + "\"";
       // Build representative HTML node
       let nodeHtml;
       if (e.attribute === "src" || e.attribute === "href" || e.attribute === "datetime" || e.attribute === "value") {
         const safeVal = String(sample).replace(/"/g, "&quot;").substring(0, 200);
         if (e.tag === "img") {
-          nodeHtml = "<img" + cls + " src=\"" + safeVal + "\" />";
+          nodeHtml = "<img" + cls + dataPath + " src=\"" + safeVal + "\" />";
         } else {
-          nodeHtml = "<" + e.tag + cls + " " + e.attribute + "=\"" + safeVal + "\"></" + e.tag + ">";
+          nodeHtml = "<" + e.tag + cls + dataPath + " " + e.attribute + "=\"" + safeVal + "\"></" + e.tag + ">";
         }
       } else {
         const safeText = String(sample).replace(/[<>&]/g, function (c) {
           return c === "<" ? "&lt;" : c === ">" ? "&gt;" : "&amp;";
         }).substring(0, 200);
-        nodeHtml = "<" + e.tag + cls + ">" + safeText + "</" + e.tag + ">";
+        nodeHtml = "<" + e.tag + cls + dataPath + ">" + safeText + "</" + e.tag + ">";
       }
       htmlParts.push(nodeHtml);
 
-      // Build a CSS selector for this field (used as fallback if AI doesn't supply one)
+      // Build a class-based CSS selector for matching AI output back to a leaf
       let sel = e.tag;
       if (e.classes.length) {
         try { sel += "." + e.classes.map(function (c) { return CSS.escape(c); }).join("."); }
@@ -349,6 +373,7 @@
       }
       fields.push({
         selector: sel,
+        fallbackSelector: e.fallbackSelector || "",
         attribute: e.attribute,
         dataType: dataType,
         sampleValues: e.values.slice(),
