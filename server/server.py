@@ -14,7 +14,7 @@ from flask_cors import CORS
 import cache
 import config
 import scrape_runs
-from analyzer import analyze, analyze_pagination
+from analyzer import analyze, analyze_pagination, write_cache_hit_debug
 from logger import make_logger
 from pattern_discovery import discover as discover_patterns
 from providers import provider_health
@@ -70,8 +70,9 @@ def analyze_endpoint():
     if url and structural_hash:
         cached = cache.get(url, structural_hash)
         if cached is not None:
-            log.info("route_analyze_cache_hit", phase="mutate", url=url, hash=structural_hash)
-            return jsonify({**cached, "cached": True})
+            run_id = write_cache_hit_debug(metadata, samples, cached)
+            log.info("route_analyze_cache_hit", phase="mutate", url=url, hash=structural_hash, runId=run_id)
+            return jsonify({**cached, "cached": True, "runId": run_id})
 
     log.info(
         "route_analyze",

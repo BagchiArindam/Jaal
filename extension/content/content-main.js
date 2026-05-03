@@ -213,13 +213,17 @@
       // Validate each AI-returned column selector against real items.
       // If a selector matches 0 or >1 elements per card, substitute the
       // deterministic fallbackSelector recorded during super-item construction.
-      if (superItem && superItem.leaves && superItem.leaves.length > 0) {
+      // usedLeafIndices ensures each leaf is consumed at most once across columns.
+      const _leaves = superItem && superItem.leaves && superItem.leaves.length > 0
+        ? superItem.leaves : [];
+      if (_leaves.length > 0) {
+        const usedLeafIndices = new Set();
         analysis.columns = (analysis.columns || []).map(function (col) {
-          return _validateOrFallbackColumn(col, containerEl, analysis.itemSelector, superItem.leaves);
+          return _validateOrFallbackColumn(col, containerEl, analysis.itemSelector, _leaves, usedLeafIndices);
         });
       }
 
-      const validation = validateAnalysis(containerEl, analysis);
+      const validation = validateAnalysis(containerEl, analysis, _leaves);
       if (!validation.valid) {
         if (loadingInst) loadingInst.showError("Analysis failed: " + validation.reason + ". Try selecting a different element.");
         return;
@@ -260,7 +264,10 @@
   // Validate an AI-returned column selector against real items in the DOM.
   // If a selector matches 0 or >1 elements per item, substitute the
   // deterministic fallbackSelector recorded during super-item construction.
-  function _validateOrFallbackColumn(col, container, itemSel, superLeaves) {
+  // Never returns an unfixed column without logging the decision.
+  // usedLeafIndices: Set<number> — shared across all column calls so each leaf
+  // is consumed at most once in the positional fallback step.
+  function _validateOrFallbackColumn(col, container, itemSel, superLeaves, usedLeafIndices) {
     if (!col || (!col.selector && col.selector !== "")) return col;
     if (col.selector === "") return col; // "" means the item itself — always valid
 
@@ -280,29 +287,71 @@
     const allExactlyOne = matchCounts.every(function (n) { return n === 1; });
     if (allExactlyOne) return col; // AI's selector is valid
 
-    // Find the best-matching super-item leaf by class overlap
+    const leaves = superLeaves || [];
+    console.warn("[Jaal validate] col='" + col.name + "' ai='" + col.selector +
+                 "' matched=" + JSON.stringify(matchCounts) + " — searching fallback");
+
+    // Strategy 1: class overlap
     const colClasses = (col.selector.match(/\.[\w-]+/g) || []).map(function (c) { return c.slice(1); });
-    let bestLeaf = null;
+    let bestIdx = -1;
     let bestScore = 0;
-    for (var i = 0; i < superLeaves.length; i++) {
-      var leaf = superLeaves[i];
-      if (!leaf.fallbackSelector) continue;
+    for (var i = 0; i < leaves.length; i++) {
+      if (usedLeafIndices && usedLeafIndices.has(i)) continue;
+      var leaf = leaves[i];
       var leafClasses = (leaf.selector.match(/\.[\w-]+/g) || []).map(function (c) { return c.slice(1); });
       var shared = colClasses.filter(function (c) { return leafClasses.indexOf(c) >= 0; }).length;
-      if (shared > bestScore) { bestScore = shared; bestLeaf = leaf; }
+      if (shared > bestScore) { bestScore = shared; bestIdx = i; }
+    }
+    if (bestIdx >= 0 && bestScore > 0) {
+      var chosen = leaves[bestIdx].fallbackSelector || leaves[bestIdx].selector;
+      if (usedLeafIndices) usedLeafIndices.add(bestIdx);
+      console.warn("[Jaal validate] → class-match leaf[" + bestIdx + "] sel='" + chosen + "'");
+      return Object.assign({}, col, { selector: chosen });
     }
 
-    if (bestLeaf && bestLeaf.fallbackSelector && bestScore > 0) {
-      console.warn("[Jaal] column '" + col.name + "': AI selector '" + col.selector +
-                   "' matched " + matchCounts + " — using fallback '" + bestLeaf.fallbackSelector + "'");
-      return Object.assign({}, col, { selector: bestLeaf.fallbackSelector });
+    // Strategy 2: dataType match
+    var colDataType = col.dataType || "";
+    for (var j = 0; j < leaves.length; j++) {
+      if (usedLeafIndices && usedLeafIndices.has(j)) continue;
+      if (leaves[j].dataType === colDataType && colDataType !== "" && colDataType !== "text") {
+        var chosen2 = leaves[j].fallbackSelector || leaves[j].selector;
+        if (usedLeafIndices) usedLeafIndices.add(j);
+        console.warn("[Jaal validate] → dataType-match leaf[" + j + "] dataType=" + colDataType + " sel='" + chosen2 + "'");
+        return Object.assign({}, col, { selector: chosen2 });
+      }
     }
-    console.warn("[Jaal] column '" + col.name + "': AI selector '" + col.selector +
-                 "' matched " + matchCounts + " — no fallback found, keeping AI selector");
+
+    // Strategy 3: next unused leaf (positional)
+    for (var k = 0; k < leaves.length; k++) {
+      if (usedLeafIndices && usedLeafIndices.has(k)) continue;
+      var chosen3 = leaves[k].fallbackSelector || leaves[k].selector;
+      if (usedLeafIndices) usedLeafIndices.add(k);
+      console.warn("[Jaal validate] → positional leaf[" + k + "] sel='" + chosen3 + "'");
+      return Object.assign({}, col, { selector: chosen3 });
+    }
+
+    console.warn("[Jaal validate] → no fallback available for '" + col.name + "', keeping AI selector");
     return col;
   }
 
-  function validateAnalysis(container, analysis) {
+  // Infer a human-readable name from a super-item leaf for promoted columns.
+  function _guessNameFromLeaf(leaf, index) {
+    if (leaf.dataType === "currency") return "Price";
+    if (leaf.dataType === "rating") return "Rating";
+    if (leaf.dataType === "date") return "Date";
+    if (leaf.dataType === "image") return "Image";
+    if (leaf.dataType === "url") return "URL";
+    if (leaf.sampleValues && leaf.sampleValues[0]) {
+      var v = String(leaf.sampleValues[0]).trim();
+      if (v.length <= 12) return v;
+    }
+    var selStr = leaf.fallbackSelector || leaf.selector || "";
+    var m = selStr.match(/\.([\w-]+)\s*$/);
+    if (m) return m[1].replace(/[-_]/g, " ").replace(/\b\w/g, function(c) { return c.toUpperCase(); });
+    return "Field " + (index + 1);
+  }
+
+  function validateAnalysis(container, analysis, superLeaves) {
     if (!analysis || !analysis.itemSelector) {
       return { valid: false, reason: "No itemSelector in analysis" };
     }
@@ -319,12 +368,30 @@
     const validColumns = analysis.columns.filter(function (col) {
       if (!col.selector || col.selector === "") return true;
       const safeSel = col.selector.trimStart().startsWith(">") ? ":scope " + col.selector : col.selector;
-      for (let i = 0; i < Math.min(3, items.length); i++) {
+      for (var i = 0; i < Math.min(3, items.length); i++) {
         if (items[i].querySelector(safeSel)) return true;
       }
       return false;
     });
     if (validColumns.length === 0) {
+      // AI returned no usable selectors and all fallbacks are exhausted.
+      // Promote super-item leaves directly to columns so the user gets a
+      // working toolbar (possibly with extra columns to hide) instead of an error.
+      var leaves = superLeaves || [];
+      if (leaves.length > 0) {
+        var promoted = leaves.map(function (leaf, i) {
+          return {
+            name: _guessNameFromLeaf(leaf, i),
+            selector: leaf.fallbackSelector || leaf.selector || "",
+            attribute: leaf.attribute || "textContent",
+            dataType: leaf.dataType || "text",
+            hidden: false,
+          };
+        });
+        console.warn("[Jaal] validateAnalysis: AI columns all invalid — promoting " +
+          promoted.length + " super-item leaves to columns");
+        return { valid: true, columns: promoted, itemCount: items.length, autoPromoted: true };
+      }
       return { valid: false, reason: "No column selectors matched actual elements" };
     }
     return { valid: true, columns: validColumns, itemCount: items.length };

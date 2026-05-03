@@ -133,39 +133,49 @@ def _generate_run_id() -> str:
     return f"ana_{ts}_{suffix}"
 
 
-def _write_debug_artifacts(
+def _write_debug_pre(
     run_id: str,
     system_prompt: str,
     user_prompt: str,
     metadata: dict,
     samples: list,
-    result: dict,
 ) -> None:
+    """Write input-side artifacts BEFORE calling the AI provider.
+    Called on every /analyze request so artifacts exist even if the provider throws."""
     try:
         run_dir = os.path.join(_DEBUG_DIR, run_id)
         os.makedirs(run_dir, exist_ok=True)
-
         if samples:
             with open(os.path.join(run_dir, "super-element.html"), "w", encoding="utf-8") as f:
                 f.write(samples[0])
-
         with open(os.path.join(run_dir, "metadata.json"), "w", encoding="utf-8") as f:
             json.dump(metadata, f, indent=2, default=str)
-
         url = metadata.get("url", "")
         with open(os.path.join(run_dir, "url.txt"), "w", encoding="utf-8") as f:
             f.write(url)
-
         with open(os.path.join(run_dir, "prompt.txt"), "w", encoding="utf-8") as f:
             f.write("=== SYSTEM ===\n")
             f.write(system_prompt)
             f.write("\n\n=== USER ===\n")
             f.write(user_prompt)
+        log.info("debug_pre_written", phase="mutate", runId=run_id)
+    except Exception as exc:
+        log.warning("debug_pre_failed", phase="error", runId=run_id, err=str(exc))
 
+
+def _write_debug_post(
+    run_id: str,
+    metadata: dict,
+    result: dict,
+    status: str = "ok",
+) -> None:
+    """Write output-side artifacts + index.jsonl after provider returns (or on error)."""
+    try:
+        run_dir = os.path.join(_DEBUG_DIR, run_id)
+        os.makedirs(run_dir, exist_ok=True)
         with open(os.path.join(run_dir, "parsed.json"), "w", encoding="utf-8") as f:
             json.dump(result, f, indent=2, default=str)
-
-        index_path = os.path.join(_DEBUG_DIR, "index.jsonl")
+        url = metadata.get("url", "")
         parts = url.split("/")
         domain = parts[2] if len(parts) > 2 else ""
         summary = {
@@ -175,15 +185,44 @@ def _write_debug_artifacts(
             "domain": domain,
             "fieldCount": metadata.get("fieldCount", 0),
             "columnCount": len(result.get("columns", [])),
-            "status": "ok",
+            "status": status,
         }
+        index_path = os.path.join(_DEBUG_DIR, "index.jsonl")
         with open(index_path, "a", encoding="utf-8") as f:
             f.write(json.dumps(summary) + "\n")
-
         _prune_debug(index_path, max_entries=500)
-
+        log.info("debug_post_written", phase="mutate", runId=run_id, status=status)
     except Exception as exc:
-        log.warning("debug_write_failed", phase="error", err=str(exc))
+        log.warning("debug_post_failed", phase="error", runId=run_id, err=str(exc))
+
+
+def _write_debug_error(run_id: str, metadata: dict, exc_traceback: str) -> None:
+    """Write error.txt on provider exception + index.jsonl with status='error'."""
+    import traceback as _tb
+    try:
+        run_dir = os.path.join(_DEBUG_DIR, run_id)
+        os.makedirs(run_dir, exist_ok=True)
+        with open(os.path.join(run_dir, "error.txt"), "w", encoding="utf-8") as f:
+            f.write(exc_traceback)
+    except Exception:
+        pass
+    _write_debug_post(run_id, metadata, {}, status="error")
+
+
+def write_cache_hit_debug(metadata: dict, samples: list, cached_result: dict) -> str:
+    """Write debug artifacts for a cache-hit /analyze response. Returns the new runId."""
+    run_id = _generate_run_id()
+    user_message = _build_column_prompt(metadata, samples) if samples else "(no samples — cache hit)"
+    _write_debug_pre(run_id, COLUMN_SYSTEM_PROMPT, user_message, metadata, samples)
+    try:
+        run_dir = os.path.join(_DEBUG_DIR, run_id)
+        with open(os.path.join(run_dir, "cache-hit.txt"), "w", encoding="utf-8") as f:
+            f.write("Cache hit — the AI was NOT called for this request.\n"
+                    "The result in parsed.json came from the server cache.\n")
+    except Exception:
+        pass
+    _write_debug_post(run_id, metadata, cached_result, status="cache-hit")
+    return run_id
 
 
 def _prune_debug(index_path: str, max_entries: int = 500) -> None:
@@ -246,6 +285,7 @@ def _build_column_prompt(metadata: dict, samples: list[str]) -> str:
 
 
 def analyze(metadata: dict, samples: list[str]) -> dict:
+    import traceback as _tb
     run_id = _generate_run_id()
     user_message = _build_column_prompt(metadata, samples)
     provider = get_provider()
@@ -258,7 +298,14 @@ def analyze(metadata: dict, samples: list[str]) -> dict:
         promptChars=len(user_message),
         sampleCount=len(samples),
     )
-    result = provider.run_json_task(COLUMN_SYSTEM_PROMPT, user_message)
+    # Write input artifacts before provider so they exist even if provider throws.
+    _write_debug_pre(run_id, COLUMN_SYSTEM_PROMPT, user_message, metadata, samples)
+    try:
+        result = provider.run_json_task(COLUMN_SYSTEM_PROMPT, user_message)
+    except Exception as exc:
+        _write_debug_error(run_id, metadata, _tb.format_exc())
+        log.error("analyze_provider_failed", phase="error", runId=run_id, err=str(exc))
+        raise
     log.info(
         "analyze_done",
         phase="mutate",
@@ -266,7 +313,7 @@ def analyze(metadata: dict, samples: list[str]) -> dict:
         columnCount=len(result.get("columns", [])),
         itemSelector=result.get("itemSelector"),
     )
-    _write_debug_artifacts(run_id, COLUMN_SYSTEM_PROMPT, user_message, metadata, samples, result)
+    _write_debug_post(run_id, metadata, result, status="ok")
     result["runId"] = run_id
     return result
 

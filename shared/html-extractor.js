@@ -78,20 +78,38 @@
   // inside thin structural wrappers (e.g. Swiggy's 2-column grid:
   // container > row > KyyFD > _1WDPG > [item, item]).
   // Returns the deepest element that is a consistent repeating unit, or null.
+  //
+  // Key invariant: only signal 2D-matrix (return non-null) when we've actually
+  // drilled at least one level. Never return the container's direct children
+  // unless they're themselves the result of unwrapping (depth > 0).
+  // Bug fixed: old code returned `grandchildren` when deeper returned null,
+  // which gave 120 individual field elements instead of 30 product cards on
+  // matrix grids where card internals are heterogeneous.
   function unwrapToRepeatingItems(children, depth) {
     if (depth === undefined) depth = 0;
     if (depth > 4 || children.length < 2) return null;
 
-    const tags = children.map((c) => c.tagName);
-    const allSameTag = tags.every((t) => t === tags[0]);
+    const tags = children.map(function (c) { return c.tagName; });
+    const allSameTag = tags.every(function (t) { return t === tags[0]; });
     if (!allSameTag) return null;
 
-    const grandchildren = children.flatMap((c) => Array.from(c.children));
+    const grandchildren = children.flatMap(function (c) { return Array.from(c.children); });
     if (grandchildren.length === 0) return null;
 
     if (grandchildren.length >= children.length) {
-      const deeper = unwrapToRepeatingItems(grandchildren, depth + 1);
-      return deeper || grandchildren;
+      // Only recurse deeper if grandchildren are also homogeneous.
+      // If grandchildren are heterogeneous, the CURRENT children are the
+      // actual repeating items (their mixed-tag internals are the data fields).
+      const gcTags = grandchildren.map(function (c) { return c.tagName; });
+      const gcAllSameTag = gcTags.every(function (t) { return t === gcTags[0]; });
+      if (gcAllSameTag) {
+        const deeper = unwrapToRepeatingItems(grandchildren, depth + 1);
+        return deeper || grandchildren;
+      }
+      // Grandchildren are heterogeneous → current children are the repeating units.
+      // Return them only if we've drilled at least one level (otherwise the direct
+      // children of the container are just a normal 1D list).
+      return depth > 0 ? children : null;
     }
 
     return null;
@@ -192,22 +210,38 @@
 
   function analyzeParent(parent) {
     if (!parent || parent.nodeType !== 1) {
+      console.warn("[Jaal.htmlExtractor] analyzeParent — invalid parent node");
       return { layout: "1D", items: [], itemSelector: "" };
     }
     const directChildren = Array.from(parent.children);
     if (directChildren.length === 0) {
+      console.warn("[Jaal.htmlExtractor] analyzeParent — parent has no children");
       return { layout: "1D", items: [], itemSelector: "" };
     }
 
+    console.log("[Jaal.htmlExtractor] analyzeParent — start tag=" + parent.tagName.toLowerCase()
+      + " directChildren=" + directChildren.length);
+
     const unwrapped = unwrapToRepeatingItems(directChildren);
-    const items = unwrapped || directChildren;
+    let items = unwrapped || directChildren;
     const layout = unwrapped ? "2D-matrix" : "1D";
+
+    if (unwrapped) {
+      console.log("[Jaal.htmlExtractor] analyzeParent — 2D-matrix: unwrapped " +
+        directChildren.length + " direct children → " + items.length + " inner items");
+    } else {
+      console.log("[Jaal.htmlExtractor] analyzeParent — 1D: " + items.length + " direct items");
+    }
+
+    if (items.length === 0) {
+      console.warn("[Jaal.htmlExtractor] analyzeParent — 0 items after unwrap; falling back to direct children");
+      items = directChildren;
+    }
+
     const itemSelector = _itemSelectorFor(items);
 
-    console.log("[Jaal.htmlExtractor] analyzeParent —",
-      "layout=" + layout,
-      "items=" + items.length,
-      "itemSelector=" + itemSelector);
+    console.log("[Jaal.htmlExtractor] analyzeParent — done layout=" + layout
+      + " items=" + items.length + " itemSelector=" + itemSelector);
 
     return { layout: layout, items: items, itemSelector: itemSelector };
   }
@@ -383,9 +417,12 @@
 
     const html = "<div class=\"jaal-super-item\">" + htmlParts.join("") + "</div>";
 
-    console.log("[Jaal.htmlExtractor] buildSyntheticSuperItem —",
-      "items=" + items.length,
-      "uniqueFields=" + fields.length);
+    if (fields.length === 0) {
+      console.warn("[Jaal.htmlExtractor] buildSyntheticSuperItem — 0 fields found across " +
+        items.length + " items! First item outerHTML preview:", items[0].outerHTML.slice(0, 600));
+    }
+    console.log("[Jaal.htmlExtractor] buildSyntheticSuperItem — done items=" + items.length
+      + " uniqueFields=" + fields.length);
 
     return { html: html, fieldCount: fields.length, itemCount: items.length, leaves: fields };
   }
