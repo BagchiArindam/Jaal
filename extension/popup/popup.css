@@ -217,3 +217,37 @@ body {
   font-family: monospace;
 }
 .suggest-pat-text { flex: 1; color: #1a1a2e; }
+
+/* Compare fields tab */
+.compare-wrapper {
+  overflow-x: auto;
+  margin-bottom: 6px;
+}
+.compare-table {
+  border-collapse: collapse;
+  font-size: 11px;
+  width: 100%;
+}
+.compare-table th, .compare-table td {
+  border: 1px solid #e5e7eb;
+  padding: 4px 6px;
+  text-align: center;
+  white-space: nowrap;
+}
+.compare-table th.field-name, .compare-table td.field-name {
+  text-align: left;
+  min-width: 80px;
+  font-weight: 500;
+  color: #374151;
+}
+.compare-table th.compare-col {
+  max-width: 80px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  color: #6b7280;
+  font-weight: 600;
+}
+.compare-table tr.field-common td.field-name { font-weight: 700; color: #1a1a2e; }
+.field-present { color: #059669; cursor: default; }
+.field-absent  { color: #d1d5db; }
+.compare-hint  { font-size: 10px; color: #9ca3af; margin: 4px 0 0; }

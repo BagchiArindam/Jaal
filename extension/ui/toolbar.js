@@ -223,6 +223,33 @@
     return 20 + (instanceIndex * 56);
   }
 
+  function _csvEscape(val) {
+    const s = String(val == null ? "" : val);
+    if (s.includes(",") || s.includes('"') || s.includes("\n") || s.includes("\r")) {
+      return '"' + s.replace(/"/g, '""') + '"';
+    }
+    return s;
+  }
+
+  function _downloadCsv(rows, columns) {
+    const visibleCols = columns.filter(function (c) { return !c.hidden; });
+    const header = visibleCols.map(function (c) { return _csvEscape(c.name); }).join(",");
+    const lines  = [header];
+    rows.forEach(function (row) {
+      lines.push(visibleCols.map(function (c) { return _csvEscape(row[c.name] != null ? row[c.name] : ""); }).join(","));
+    });
+    const csv  = lines.join("\r\n");
+    const blob = new Blob([csv], { type: "text/csv;charset=utf-8;" });
+    const url  = URL.createObjectURL(blob);
+    const a    = document.createElement("a");
+    a.href     = url;
+    a.download = (window.location.hostname || "jaal") + "_scrape_" + Date.now() + ".csv";
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  }
+
   // --- Factory: full toolbar ---
 
   function create(analysis, container, itemSelector, totalItems, options) {
@@ -258,6 +285,7 @@
       refresh: _refresh,
       isLoading: false,
       configId: _configId,
+      label: _label,
       get hostEl() { return _hostEl; },
     };
     _instances.push(instance);
@@ -267,30 +295,31 @@
 
     function _createHost(nearElement) {
       _hostEl = document.createElement("div");
-      _hostEl.style.cssText = "position:fixed;top:" + _stackTop(_instanceIndex) + "px;right:20px;z-index:2147483647";
-      document.body.appendChild(_hostEl);
-
       _shadowRoot = _hostEl.attachShadow({ mode: "open" });
       const style = document.createElement("style");
       style.textContent = TOOLBAR_CSS;
       _shadowRoot.appendChild(style);
 
-      // Anchor near the picked container if it has room
-      if (nearElement) {
-        try {
-          const rect = nearElement.getBoundingClientRect();
-          // Only override the stack-top placement when the container has
-          // a usable position (right side wide enough)
-          if (rect.right > 0 && rect.left < window.innerWidth) {
-            const top  = Math.max(_stackTop(_instanceIndex), Math.min(rect.top, window.innerHeight - 300));
-            const left = rect.left > window.innerWidth / 2
-              ? Math.max(10, rect.left - 540)
-              : Math.min(rect.right + 16, window.innerWidth - 540);
-            _hostEl.style.top  = top  + "px";
-            _hostEl.style.left = left + "px";
-            _hostEl.style.right = "";
-          }
-        } catch (_) {}
+      // If modal is available, it will parent us — don't attach to body.
+      // Fallback: attach to body with fixed positioning (standalone mode).
+      if (!ns.modal) {
+        _hostEl.style.cssText = "position:fixed;top:" + _stackTop(_instanceIndex) + "px;right:20px;z-index:2147483647";
+        document.body.appendChild(_hostEl);
+
+        if (nearElement) {
+          try {
+            const rect = nearElement.getBoundingClientRect();
+            if (rect.right > 0 && rect.left < window.innerWidth) {
+              const top  = Math.max(_stackTop(_instanceIndex), Math.min(rect.top, window.innerHeight - 300));
+              const left = rect.left > window.innerWidth / 2
+                ? Math.max(10, rect.left - 540)
+                : Math.min(rect.right + 16, window.innerWidth - 540);
+              _hostEl.style.top  = top  + "px";
+              _hostEl.style.left = left + "px";
+              _hostEl.style.right = "";
+            }
+          } catch (_) {}
+        }
       }
     }
 
@@ -350,6 +379,79 @@
       ns.sorter.applyFilters(container, _itemSel, _columns, _effectiveFilters());
       _updateStatus(toolbar);
       _updateCount(toolbar);
+    }
+
+    // Wire events for a single column row (used by initial setup and + Field).
+    function _wireColumnRow(row, colIdx, col, toolbar) {
+      row.querySelectorAll(".jaal-sort-btn").forEach(function (btn) {
+        btn.addEventListener("click", function () {
+          const dir = btn.getAttribute("data-dir");
+          if (_currentSort.colIndex === colIdx && _currentSort.direction === dir) {
+            ns.sorter && ns.sorter.resetOrder();
+            _currentSort = { colIndex: -1, direction: null };
+            toolbar.querySelectorAll(".jaal-sort-btn").forEach(function (b) { b.classList.remove("active"); });
+          } else {
+            _currentSort = { colIndex: colIdx, direction: dir };
+            toolbar.querySelectorAll(".jaal-sort-btn").forEach(function (b) { b.classList.remove("active"); });
+            btn.classList.add("active");
+            ns.sorter && ns.sorter.sortElements(container, _itemSel, col, dir);
+          }
+          _updateStatus(toolbar);
+        });
+      });
+
+      const filterInput = row.querySelector(".jaal-filter");
+      if (filterInput) {
+        filterInput.addEventListener("input", function () {
+          _filterValues[colIdx] = filterInput.value;
+          _applyAllFilters(toolbar);
+        });
+      }
+
+      const nullBtn = row.querySelector(".jaal-null-btn");
+      if (nullBtn) {
+        nullBtn.addEventListener("click", function () {
+          const cur  = _nullStates[colIdx] || "off";
+          const next = cur === "off" ? "non-null" : cur === "non-null" ? "null-only" : "off";
+          _nullStates[colIdx] = next;
+          nullBtn.className = "jaal-null-btn" + (next !== "off" ? " " + next : "");
+          nullBtn.title = next === "non-null" ? "Has value" : next === "null-only" ? "Empty only" : "Null filter: off";
+          nullBtn.textContent = next === "non-null" ? "?" : next === "null-only" ? "?!" : "○";
+          if (filterInput) filterInput.disabled = (next !== "off");
+          _applyAllFilters(toolbar);
+        });
+      }
+
+      const ddBtn = row.querySelector(".jaal-dd-btn");
+      if (ddBtn) {
+        ddBtn.addEventListener("click", function (e) {
+          e.stopPropagation();
+          if (_activeDropCol === colIdx) { _closeDropdown(toolbar); return; }
+          _openDropdown(toolbar, colIdx, ddBtn);
+        });
+      }
+
+      const hideBtn = row.querySelector(".jaal-hide-btn");
+      if (hideBtn) {
+        hideBtn.addEventListener("click", function () {
+          _hiddenCols[colIdx] = true;
+          row.style.display = "none";
+          _updateShowHiddenBtn(toolbar);
+          _applyAllFilters(toolbar);
+        });
+      }
+
+      const nameEl = row.querySelector(".jaal-col-name");
+      if (nameEl) {
+        nameEl.addEventListener("mouseenter", function () {
+          nameEl.classList.add("hl-active");
+          _highlightField(col, true);
+        });
+        nameEl.addEventListener("mouseleave", function () {
+          nameEl.classList.remove("hl-active");
+          _highlightField(col, false);
+        });
+      }
     }
 
     // ─── Column hover highlight ─────────────────────────────────────
@@ -745,11 +847,14 @@
     // ─── Header buttons ─────────────────────────────────────────────
 
     function _setupHeaderButtons(toolbar) {
-      const closeBtn   = toolbar.querySelector(".jaal-close");
-      const resetBtn   = toolbar.querySelector(".jaal-reset");
-      const repickBtn  = toolbar.querySelector(".jaal-repick");
-      const detectBtn  = toolbar.querySelector(".jaal-detect");
-      const flattenBtn = toolbar.querySelector(".jaal-flatten");
+      const closeBtn    = toolbar.querySelector(".jaal-close");
+      const resetBtn    = toolbar.querySelector(".jaal-reset");
+      const addFieldBtn = toolbar.querySelector(".jaal-add-field");
+      const debugBtn    = toolbar.querySelector(".jaal-debug");
+      const scrapeBtn   = toolbar.querySelector(".jaal-scrape");
+      const repickBtn   = toolbar.querySelector(".jaal-repick");
+      const detectBtn   = toolbar.querySelector(".jaal-detect");
+      const flattenBtn  = toolbar.querySelector(".jaal-flatten");
       const collapseBtn = toolbar.querySelector(".jaal-collapse");
 
       if (collapseBtn) {
@@ -787,6 +892,159 @@
         _updateCount(toolbar);
         log.info && log.info("reset", { phase: "mutate" });
       });
+
+      if (addFieldBtn) {
+        addFieldBtn.addEventListener("click", async function () {
+          if (!ns.picker || !ns.fieldHelpers) {
+            log.warn && log.warn("add_field_unavailable", { phase: "error", hasPicker: !!ns.picker, hasHelpers: !!ns.fieldHelpers });
+            return;
+          }
+          addFieldBtn.disabled = true;
+          addFieldBtn.textContent = "…";
+          try {
+            const { element } = await ns.picker.activate({
+              tooltipHeader: "Click a value inside any item card",
+              prompt: "Pick a field. Scroll ↕ to walk up.",
+              highlightColor: "#10b981",
+            });
+
+            const itemAncestor = ns.fieldHelpers.findItemAncestor(element, container, _itemSel);
+            if (!itemAncestor) {
+              log.warn && log.warn("add_field_no_ancestor", { phase: "skip" });
+              addFieldBtn.textContent = "Not in item";
+              setTimeout(function () { addFieldBtn.textContent = "+ Field"; }, 2000);
+              return;
+            }
+
+            const selector = ns.fieldHelpers.buildRelativeSelector(element, itemAncestor);
+            if (!selector) {
+              log.warn && log.warn("add_field_no_selector", { phase: "skip" });
+              addFieldBtn.textContent = "+ Field";
+              return;
+            }
+
+            // Duplicate check — same physical element across first 5 items
+            const safeItemSel = _itemSel && _itemSel.trimStart().startsWith(">") ? ":scope " + _itemSel : _itemSel;
+            const testItems = Array.from(container.querySelectorAll(safeItemSel)).slice(0, 5);
+            const safeSel = selector.trimStart().startsWith(">") ? ":scope " + selector : selector;
+            for (let ci = 0; ci < _columns.length; ci++) {
+              const existing = _columns[ci];
+              if (!existing.selector) continue;
+              const safeOld = existing.selector.trimStart().startsWith(">") ? ":scope " + existing.selector : existing.selector;
+              let hits = 0;
+              testItems.forEach(function (item) {
+                const a = item.querySelector(safeSel);
+                const b = item.querySelector(safeOld);
+                if (a && b && a === b) hits++;
+              });
+              if (hits >= Math.min(3, testItems.length)) {
+                log.info && log.info("add_field_duplicate", { phase: "skip", existing: existing.name });
+                addFieldBtn.textContent = "Exists!";
+                setTimeout(function () { addFieldBtn.textContent = "+ Field"; }, 2000);
+                return;
+              }
+            }
+
+            // Sample texts for data type inference
+            const sampleTexts = testItems.map(function (item) {
+              const el = item.querySelector(safeSel);
+              return el ? (el.textContent || "").trim() : "";
+            }).filter(Boolean);
+
+            const name     = ns.fieldHelpers.inferFieldName(element);
+            const dataType = ns.fieldHelpers.inferDataType(sampleTexts.join(" "));
+            const colIdx   = _columns.length;
+            const newCol   = { name: name, selector: selector, attribute: "textContent", dataType: dataType, hidden: false };
+
+            _columns.push(newCol);
+            _filterValues.push("");
+            _nullStates.push("off");
+            _hiddenCols.push(false);
+
+            const columnsDiv = toolbar.querySelector(".jaal-columns");
+            if (columnsDiv) {
+              columnsDiv.insertAdjacentHTML("beforeend", _buildColumnRow(newCol, colIdx));
+              const newRow = columnsDiv.querySelector(".jaal-column[data-col-index=\"" + colIdx + "\"]");
+              if (newRow) _wireColumnRow(newRow, colIdx, newCol, toolbar);
+            }
+
+            _updateStatus(toolbar);
+            _updateCount(toolbar);
+            log.info && log.info("add_field_done", { phase: "mutate", name: name, selector: selector, dataType: dataType });
+            addFieldBtn.textContent = "Added!";
+            setTimeout(function () { addFieldBtn.textContent = "+ Field"; }, 1500);
+          } catch (err) {
+            const msg = String(err).toLowerCase();
+            if (!msg.includes("cancel") && !msg.includes("abort")) {
+              log.error && log.error("add_field_error", { phase: "error", err: String(err) });
+            }
+            addFieldBtn.textContent = "+ Field";
+          } finally {
+            addFieldBtn.disabled = false;
+          }
+        });
+      }
+
+      if (debugBtn) {
+        debugBtn.addEventListener("click", function () {
+          if (ns.sorter && ns.sorter.debugColumns) {
+            ns.sorter.debugColumns(container, _itemSel, _columns);
+          } else {
+            console.warn("[Jaal toolbar] debugColumns not available");
+          }
+          log.info && log.info("debug_columns_triggered", { phase: "load", cols: _columns.length });
+        });
+      }
+
+      if (scrapeBtn) {
+        scrapeBtn.addEventListener("click", async function () {
+          scrapeBtn.disabled = true;
+          scrapeBtn.textContent = "…";
+          try {
+            const items = safeQSA(container, _itemSel).filter(function (el) { return el.style.display !== "none"; });
+            if (items.length === 0) {
+              scrapeBtn.textContent = "No items";
+              setTimeout(function () { scrapeBtn.textContent = "Scrape"; }, 2000);
+              return;
+            }
+
+            const visibleCols = _columns.filter(function (c) { return !c.hidden; });
+            const rows = items.map(function (item) {
+              const row = {};
+              visibleCols.forEach(function (col) {
+                const val = ns.sorter && ns.sorter.extractValue(item, col.selector, col.attribute);
+                row[col.name] = val != null ? String(val).trim() : "";
+              });
+              return row;
+            });
+
+            _downloadCsv(rows, visibleCols);
+            log.info && log.info("scrape_csv_downloaded", { phase: "mutate", rows: rows.length, cols: visibleCols.length });
+
+            if (ns.scrapeRuns) {
+              try {
+                const siteKey = window.location.hostname + (window.location.pathname.replace(/\/+$/, "") || "/");
+                const config  = { itemSelector: _itemSel, columns: _columns, containerSelector: _containerSel || null };
+                const { runId } = await ns.scrapeRuns.start(siteKey, config);
+                await ns.scrapeRuns.checkpoint(runId, rows, {});
+                await ns.scrapeRuns.complete(runId, { totalRows: rows.length, url: window.location.href });
+                log.info && log.info("scrape_run_saved", { phase: "mutate", runId: runId, rows: rows.length });
+              } catch (serverErr) {
+                log.warn && log.warn("scrape_server_skip", { phase: "warn", err: String(serverErr) });
+              }
+            }
+
+            scrapeBtn.textContent = rows.length + " rows";
+            setTimeout(function () { scrapeBtn.textContent = "Scrape"; }, 3000);
+          } catch (err) {
+            log.error && log.error("scrape_error", { phase: "error", err: String(err) });
+            scrapeBtn.textContent = "Error";
+            setTimeout(function () { scrapeBtn.textContent = "Scrape"; }, 2000);
+          } finally {
+            scrapeBtn.disabled = false;
+          }
+        });
+      }
 
       if (repickBtn) repickBtn.addEventListener("click", function () {
         _destroy();
@@ -896,9 +1154,12 @@
         "<button class=\"jaal-hbtn jaal-collapse\" title=\"Collapse\">▼</button>" +
         "<button class=\"jaal-hbtn jaal-detect\" title=\"Detect pagination\">Detect</button>" +
         "<button class=\"jaal-hbtn jaal-flatten\" title=\"Flatten all pages\" style=\"display:none\">Flatten</button>" +
+        "<button class=\"jaal-hbtn jaal-scrape\" title=\"Scrape visible items to CSV\">Scrape</button>" +
         "<button class=\"jaal-hbtn jaal-show-hidden\" title=\"Show hidden columns\" style=\"display:none\">Hidden</button>" +
         "<button class=\"jaal-hbtn jaal-finalize\" title=\"Save for auto-inject\">" + (_isFinalized ? "Unfinalize" : "Finalize") + "</button>" +
         "<button class=\"jaal-hbtn jaal-reset\" title=\"Reset sort and filters\">Reset</button>" +
+        "<button class=\"jaal-hbtn jaal-add-field\" title=\"Add a field by clicking an element\">+ Field</button>" +
+        "<button class=\"jaal-hbtn jaal-debug\" title=\"Log column extraction to console\">Debug</button>" +
         "<button class=\"jaal-hbtn jaal-settings-toggle\" title=\"Settings\">⚙</button>" +
         "<button class=\"jaal-hbtn jaal-repick\" title=\"Re-pick element\">↺</button>" +
         "<button class=\"jaal-hbtn jaal-close\" title=\"Close\">✕</button>" +
@@ -974,12 +1235,28 @@
     _updateShowHiddenBtn(toolbar);
     _updateStatus(toolbar);
 
+    // Apply sortDefault for the first column that declares one
+    if (_currentSort.colIndex < 0) {
+      for (let _sdi = 0; _sdi < _columns.length; _sdi++) {
+        const _sd = _columns[_sdi].sortDefault;
+        if (_sd === "asc" || _sd === "desc") {
+          _currentSort = { colIndex: _sdi, direction: _sd };
+          ns.sorter && ns.sorter.sortElements(container, _itemSel, _columns[_sdi], _sd);
+          const _sdBtn = toolbar.querySelector(".jaal-sort-btn[data-col=\"" + _sdi + "\"][data-dir=\"" + _sd + "\"]");
+          if (_sdBtn) _sdBtn.classList.add("active");
+          log.info && log.info("sort_default_applied", { phase: "init", col: _columns[_sdi].name, dir: _sd });
+          break;
+        }
+      }
+    }
+
     function _refresh() {
       _updateStatus(toolbar);
       _updateCount(toolbar);
     }
 
     function _destroy() {
+      if (ns.modal && _configId) ns.modal.removeToolbarTab(_configId);
       if (_hostEl) { _hostEl.remove(); _hostEl = null; }
       _shadowRoot = null;
       const idx = _instances.indexOf(instance);

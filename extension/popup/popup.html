@@ -5,31 +5,21 @@
   <link rel="stylesheet" href="popup.css">
 </head>
 <body>
-  <div class="tabs">
-    <button class="tab active" data-tab="patterns">Saved patterns</button>
-    <button class="tab" data-tab="tools">Tools</button>
-  </div>
-
-  <div class="panel" id="panel-patterns">
-    <div class="patterns-list" id="patterns-list">
-      <div class="empty">Loading…</div>
-    </div>
-    <div class="patterns-footer">
-      <button class="btn btn-sm" id="export-btn">Export</button>
-      <button class="btn btn-sm" id="import-btn">Import</button>
-      <input type="file" id="import-file" accept=".json" style="display:none" />
-      <button class="btn btn-sm" id="suggest-btn" title="Sitemap-derived path suggestions for the current domain">Suggest…</button>
-    </div>
-    <div class="suggest-result" id="suggest-result" style="display:none"></div>
-  </div>
-
-  <div class="panel" id="panel-tools" style="display:none">
-    <button class="button" id="skeleton-btn">🔍 Inspect skeleton</button>
-    <button class="button" id="net-recorder-btn">📡 Net recorder</button>
-    <div class="divider"></div>
+  <div class="launcher">
+    <button class="button" id="open-modal-btn">Open Jaal panel</button>
     <div class="status" id="status">
       <span class="status-icon">⏳</span>
       <span>Server: checking…</span>
+    </div>
+  </div>
+
+  <div class="tabs">
+    <button class="tab active" data-tab="compare">Compare fields</button>
+  </div>
+
+  <div class="panel" id="panel-compare">
+    <div id="compare-output">
+      <div class="empty">Loading…</div>
     </div>
   </div>
 

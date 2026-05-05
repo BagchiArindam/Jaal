@@ -79,6 +79,19 @@
         const legacy = _configToLegacyShape(cfg);
         autoActivate(legacy, cfg);
       }
+
+    } else if (msg.type === "jaal-open-modal") {
+      log.info("open_modal", { phase: "mutate" });
+      if (Jaal.modal) {
+        Jaal.modal.openOrFocus();
+      } else {
+        console.warn("[Jaal content-main] jaal-open-modal received but Jaal.modal not loaded");
+      }
+
+    } else if (msg.type === "jaal-manual-spawn-config") {
+      const configId = msg.configId;
+      log.info("manual_spawn_config", { phase: "mutate", configId: configId });
+      if (configId) Jaal.activateConfig(configId);
     }
   });
 
@@ -246,8 +259,12 @@
               analysis.itemSelector,
               validation.itemCount,
               toolbarOpts
-            );
+        );
         Jaal._activeToolbars.set(key, inst);
+        if (Jaal.modal) {
+          Jaal.modal.openOrFocus();
+          Jaal.modal.addToolbarTab(inst);
+        }
         inst.onClose(function () {
           Jaal._activeToolbars.delete(key);
           if (Jaal.sorter) Jaal.sorter.clearOriginalOrder();
@@ -472,6 +489,10 @@
         }
       );
       Jaal._activeToolbars.set(key, inst);
+      if (Jaal.modal) {
+        Jaal.modal.openOrFocus();
+        Jaal.modal.addToolbarTab(inst);
+      }
       inst.onClose(function () {
         Jaal._activeToolbars.delete(key);
         if (Jaal.sorter) Jaal.sorter.clearOriginalOrder();
@@ -536,6 +557,19 @@
 
   // Expose for toolbar repick button
   Jaal.startPicking = startPicking;
+
+  // Expose for modal's ▶ Spawn button: activate a saved config by id
+  Jaal.activateConfig = function (configId) {
+    if (!B) { console.warn("[Jaal] activateConfig: no B"); return; }
+    B.storage.local.get("jaal_configs", function (result) {
+      const configs = Array.isArray(result && result.jaal_configs) ? result.jaal_configs : [];
+      const cfg = configs.find(function (c) { return c.id === configId; });
+      if (!cfg) { console.warn("[Jaal] activateConfig: not found", configId); return; }
+      const legacy = _configToLegacyShape(cfg);
+      autoActivate(legacy, cfg);
+      log.info("activate_config", { phase: "mutate", configId: configId });
+    });
+  };
 
   log.info("content_main_ready", { phase: "init" });
 })();

@@ -190,7 +190,10 @@ const PICKER_FILES = [
   "shared/html-extractor.js",
   "shared/sorter.js",
   "shared/paginator.js",
+  "shared/field-helpers.js",
+  "shared/scrape-runs.js",
   "content/picker.js",
+  "ui/modal.js",
   "ui/toolbar.js",
   "content/content-main.js",
 ];
@@ -241,7 +244,7 @@ function _injectFiles(tabId, files, activateMsg) {
     B.scripting
       .executeScript({ target: { tabId: tabId }, files: files })
       .then(function () {
-        if (activateMsg) B.tabs.sendMessage(tabId, { type: activateMsg });
+        if (activateMsg) _sendToTabWithRetry(tabId, { type: activateMsg });
       })
       .catch(function (err) {
         console.error(LOG_TAG, "MV3 injection failed:", err);
@@ -255,13 +258,51 @@ function _injectFiles(tabId, files, activateMsg) {
     }, Promise.resolve());
     chain
       .then(function () {
-        if (activateMsg) B.tabs.sendMessage(tabId, { type: activateMsg });
+        if (activateMsg) _sendToTabWithRetry(tabId, { type: activateMsg });
       })
       .catch(function (err) {
         console.error(LOG_TAG, "MV2 injection failed:", err);
       });
   } else {
     console.error(LOG_TAG, "no executeScript API available");
+  }
+}
+
+function _sendToTabWithRetry(tabId, message, attempts, delayMs) {
+  const tries = typeof attempts === "number" ? attempts : 5;
+  const wait = typeof delayMs === "number" ? delayMs : 120;
+  const retry = function (reason) {
+    if (tries <= 1) {
+      console.warn(LOG_TAG, "sendMessage failed:", message.type, "tab=", tabId, reason || "");
+      return;
+    }
+    setTimeout(function () {
+      _sendToTabWithRetry(tabId, message, tries - 1, wait);
+    }, wait);
+  };
+
+  try {
+    const maybePromise = B.tabs.sendMessage(tabId, message, function () {
+      if (B.runtime && B.runtime.lastError) {
+        retry(B.runtime.lastError.message);
+      }
+    });
+    if (maybePromise && typeof maybePromise.then === "function") {
+      maybePromise.catch(function (err) {
+        retry(err && err.message ? err.message : String(err));
+      });
+    }
+  } catch (err) {
+    try {
+      const promised = B.tabs.sendMessage(tabId, message);
+      if (promised && typeof promised.then === "function") {
+        promised.catch(function (sendErr) {
+          retry(sendErr && sendErr.message ? sendErr.message : String(sendErr));
+        });
+      }
+    } catch (sendErr) {
+      retry(sendErr && sendErr.message ? sendErr.message : String(sendErr));
+    }
   }
 }
 
@@ -288,9 +329,7 @@ B.tabs.onUpdated.addListener(function (tabId, changeInfo, tab) {
 
     console.log(LOG_TAG, "auto-inject for", tab.url, "—", matches.length, "config(s) matched");
     _injectFiles(tabId, PICKER_FILES, null);
-    setTimeout(function () {
-      B.tabs.sendMessage(tabId, { type: "jaal-auto-activate-multi", configs: matches });
-    }, 500);
+    _sendToTabWithRetry(tabId, { type: "jaal-auto-activate-multi", configs: matches }, 8, 150);
   });
 });
 
@@ -324,6 +363,17 @@ B.runtime.onMessage.addListener(function (msg, sender, sendResponse) {
     // (e.g. cross-context scenario). Bounce back to the sending tab.
     if (sender && sender.tab && sender.tab.id) {
       B.tabs.sendMessage(sender.tab.id, { type: "jaal-activate-picker" });
+    }
+    return false;
+  }
+
+  if (msg.type === "jaal-open-modal") {
+    const tabId = (typeof msg.tabId === "number") ? msg.tabId
+                : (sender && sender.tab && sender.tab.id);
+    if (typeof tabId === "number") {
+      _injectFiles(tabId, PICKER_FILES, "jaal-open-modal");
+    } else {
+      console.warn(LOG_TAG, "jaal-open-modal: no tabId resolved");
     }
     return false;
   }

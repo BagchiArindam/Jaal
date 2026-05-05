@@ -4,6 +4,8 @@ Jaal (Hindi/Urdu: "net / web / trap") is a web-inspection and reverse-DOM toolki
 
 This file is the source of truth. `CLAUDE.md` is a one-line shim. Follow everything here verbatim.
 
+For interrupted work, start with `workspace_handoff.md`, then check `workspace_log.md` for the detailed trail.
+
 ## What Jaal does
 
 1. **List scraping** — right-click a page, pick a repeating container, get an AI-detected column schema, sort/filter/hide inline, flatten pagination, export CSV with checkpoint resume. (Migrated forward from sort-sight.)
