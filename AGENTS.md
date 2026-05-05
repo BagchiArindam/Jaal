@@ -21,8 +21,8 @@ extension/          WebExtension variant (MV3 Chrome + MV2 Firefox)
   manifest.v2.json        MV2
   background.js           context menu + server relay + jaal_configs auto-inject
   content/                content scripts, import from ../shared
-  ui/                     toolbars, overlays, picker UI
-  popup/                  browser-action popup: Saved patterns + Tools tabs
+  ui/                     toolbars, overlays, picker UI, modal panel
+  popup/                  browser-action popup: thin launcher + Compare fields tab
 userscript/         Tampermonkey variant
   jaal.user.js            built by build/build-userscript.mjs
 shared/             core logic, imported by both variants
@@ -34,6 +34,8 @@ shared/             core logic, imported by both variants
   paginator.js            5-strategy pagination state machine
   sorter.js               client-side sort/filter
   net-replayer.js         replayer script generator
+  field-helpers.js        manual field picking: findItemAncestor, buildRelativeSelector, inferDataType
+  scrape-runs.js          client wrappers for /scrape-runs/* endpoints
   logger.js               structured JSONL logger (from cc-session-tools)
 server/             Flask app on :7773
   server.py, analyzer.py, ai_provider.py, html_cleaner.py,
@@ -145,9 +147,27 @@ When sort/filter misbehaves (wrong order, partial card movement, no movement), i
 
 The subagent is defined at `.claude/agents/jaal-diagnostician.md`. It reads the debug artifacts under `server/.debug/<runId>/` and reports one of: `super-item-missing-field`, `wrong-layout-detection`, `wrong-itemSelector`, `bad-column-selector`, `prompt-confusion`, `missing-debug-artifacts`, or `other`.
 
+## Modal panel
+
+In-page tabbed modal (`extension/ui/modal.js`) hosts all toolbar instances and pinned Patterns + Tools tabs.
+
+**Public API** (`window.Jaal.modal`):
+- `openOrFocus()` — show or create the modal
+- `close()` — hide it
+- `addToolbarTab(inst)` — reparent toolbar's hostEl into a new modal tab
+- `removeToolbarTab(configId)` — remove toolbar tab
+- `activateTab(tabId)` — switch to specific tab
+
+Toolbar instances are reparented with `position:static` to fit inside modal. When `Jaal.modal` is available, toolbars don't attach to body; background.js injects modal.js before content-main, so it's ready.
+
 ## Multi-toolbar
 
-`Jaal.toolbar.create(...)` is a factory: each call returns an isolated instance with its own host element, shadow DOM, and closure-scoped state (sort, filters, hidden columns, search-bar binding). Active instances are tracked in `_root.Jaal._activeToolbars` keyed by `configId`. Stacked top-right with `top = 20 + index * 56`.
+`Jaal.toolbar.create(...)` is a factory: each call returns an isolated instance with its own host element, shadow DOM, and closure-scoped state (sort, filters, hidden columns, search-bar binding). Active instances are tracked in `_root.Jaal._activeToolbars` keyed by `configId`. When modal is present, toolbars are reparented into modal tabs instead of stacking top-right.
+
+**Instance API includes:**
+- `.configId`, `.label` — config identity and label for modal tab title
+- `.hostEl` — shadow-DOM host element (reparented by modal if present)
+- `.refresh()`, `.destroy()`, `.onClose(fn)` — lifecycle methods
 
 ## Conventions
 
