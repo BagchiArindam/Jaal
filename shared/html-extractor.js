@@ -82,13 +82,26 @@
   // Key invariant: only signal 2D-matrix (return non-null) when we've actually
   // drilled at least one level. Never return the container's direct children
   // unless they're themselves the result of unwrapping (depth > 0).
-  // Bug fixed: old code returned `grandchildren` when deeper returned null,
-  // which gave 120 individual field elements instead of 30 product cards on
-  // matrix grids where card internals are heterogeneous.
+  // Return the fraction of elements sharing the most common tagName.
+  function _dominantTagFraction(elements) {
+    if (!elements.length) return { tag: null, fraction: 0 };
+    const counts = {};
+    for (var i = 0; i < elements.length; i++) {
+      var t = elements[i].tagName || "#";
+      counts[t] = (counts[t] || 0) + 1;
+    }
+    var best = null, bestCount = 0;
+    for (var t in counts) {
+      if (counts[t] > bestCount) { best = t; bestCount = counts[t]; }
+    }
+    return { tag: best, fraction: bestCount / elements.length };
+  }
+
   function unwrapToRepeatingItems(children, depth) {
     if (depth === undefined) depth = 0;
     if (depth > 4 || children.length < 2) return null;
 
+    // Children (row wrappers) must all share the same tag — strict.
     const tags = children.map(function (c) { return c.tagName; });
     const allSameTag = tags.every(function (t) { return t === tags[0]; });
     if (!allSameTag) return null;
@@ -97,22 +110,54 @@
     if (grandchildren.length === 0) return null;
 
     if (grandchildren.length >= children.length) {
-      // Only recurse deeper if grandchildren are also homogeneous.
-      // If grandchildren are heterogeneous, the CURRENT children are the
-      // actual repeating items (their mixed-tag internals are the data fields).
-      const gcTags = grandchildren.map(function (c) { return c.tagName; });
-      const gcAllSameTag = gcTags.every(function (t) { return t === gcTags[0]; });
-      if (gcAllSameTag) {
-        const deeper = unwrapToRepeatingItems(grandchildren, depth + 1);
-        return deeper || grandchildren;
+      // Relaxed: accept grandchildren as repeating items if ≥60% share the dominant tag.
+      // This handles rows that have product cards + occasional in-row ad slots with
+      // different tags (e.g. Swiggy Instamart rows: 2×div.card + 1×aside.ad).
+      const gcDom = _dominantTagFraction(grandchildren);
+      if (gcDom.fraction >= 0.6) {
+        // Filter to dominant-tag grandchildren for recursion and return
+        const gcDominant = gcDom.fraction === 1
+          ? grandchildren
+          : grandchildren.filter(function (g) { return g.tagName === gcDom.tag; });
+        const deeper = unwrapToRepeatingItems(gcDominant, depth + 1);
+        return deeper || gcDominant;
       }
-      // Grandchildren are heterogeneous → current children are the repeating units.
-      // Return them only if we've drilled at least one level (otherwise the direct
-      // children of the container are just a normal 1D list).
+      // Grandchildren are too heterogeneous → current children are the repeating units.
+      // Return them only if we've drilled at least one level.
       return depth > 0 ? children : null;
     }
 
     return null;
+  }
+
+  // Filter out "aberrant" siblings — children whose leaf-signature Jaccard similarity
+  // to the median item is below threshold. Removes brand-spotlight rows, carousels,
+  // and ad blocks that appear as siblings of real product cards.
+  function _filterAberrantSiblings(items) {
+    if (items.length <= 2) return items;
+    var sigSets = items.map(function (item) {
+      var leaves = _gatherLeaves(item);
+      var s = new Set(leaves.map(function (l) { return _signature(l); }));
+      return s;
+    });
+    // Use median item as reference
+    var refSet = sigSets[Math.floor(sigSets.length / 2)];
+    if (refSet.size === 0) return items;
+    var filtered = items.filter(function (_, i) {
+      var s = sigSets[i];
+      if (s.size === 0) return false;
+      var intersection = 0;
+      s.forEach(function (sig) { if (refSet.has(sig)) intersection++; });
+      var union = s.size + refSet.size - intersection;
+      var jaccard = intersection / union;
+      return jaccard >= 0.15; // lenient: brand spotlights score near 0, product cards score >0.3
+    });
+    if (filtered.length === 0) return items; // safety net
+    if (filtered.length < items.length) {
+      console.log("[Jaal.htmlExtractor] _filterAberrantSiblings — rejected " +
+        (items.length - filtered.length) + " outlier sibling(s)");
+    }
+    return filtered;
   }
 
   function extractMinimalHTML(containerElement, sampleCount = 3, hintElement = null) {
@@ -238,6 +283,10 @@
       items = directChildren;
     }
 
+    // Filter out aberrant siblings (ads, carousels, brand spotlights) whose
+    // leaf-signature Jaccard similarity vs the median item is < 0.15.
+    items = _filterAberrantSiblings(items);
+
     const itemSelector = _itemSelectorFor(items);
 
     console.log("[Jaal.htmlExtractor] analyzeParent — done layout=" + layout
@@ -347,9 +396,24 @@
     return leaf.tag + "|" + leaf.classes.join(".") + "|" + (leaf.attribute || "");
   }
 
+  function _buildSuperItemNode(e, sampleValue) {
+    var cls = e.classes.length ? " class=\"" + e.classes.join(" ").replace(/"/g, "&quot;") + "\"" : "";
+    var dataPath = " data-jaal-path=\"" + (e.fallbackSelector || "").replace(/"/g, "&quot;") + "\"";
+    var sample = sampleValue || "";
+    if (e.attribute === "src" || e.attribute === "href" || e.attribute === "datetime" || e.attribute === "value") {
+      var safeVal = String(sample).replace(/"/g, "&quot;").substring(0, 200);
+      if (e.tag === "img") return "<img" + cls + dataPath + " src=\"" + safeVal + "\" />";
+      return "<" + e.tag + cls + dataPath + " " + e.attribute + "=\"" + safeVal + "\"></" + e.tag + ">";
+    }
+    var safeText = String(sample).replace(/[<>&]/g, function (c) {
+      return c === "<" ? "&lt;" : c === ">" ? "&gt;" : "&amp;";
+    }).substring(0, 200);
+    return "<" + e.tag + cls + dataPath + ">" + safeText + "</" + e.tag + ">";
+  }
+
   function buildSyntheticSuperItem(items) {
     if (!Array.isArray(items) || items.length === 0) {
-      return { html: "<div class=\"jaal-super-item\"></div>", fieldCount: 0, itemCount: 0, leaves: [] };
+      return { html: "<div class=\"jaal-super-item\"></div>", htmlBlocks: [], fieldCount: 0, itemCount: 0, leaves: [] };
     }
     const bySig = new Map();
     for (const item of items) {
@@ -374,57 +438,46 @@
       }
     }
 
-    const fields = [];
-    const htmlParts = [];
-    for (const e of bySig.values()) {
-      const cls = e.classes.length ? " class=\"" + e.classes.join(" ").replace(/"/g, "&quot;") + "\"" : "";
-      const sample = e.values[0] || "";
-      const dataType = _detectDataType(sample, e.attribute);
-      // data-jaal-path stamps the DOM path so AI can use it as a selector hint
-      const dataPath = " data-jaal-path=\"" + (e.fallbackSelector || "").replace(/"/g, "&quot;") + "\"";
-      // Build representative HTML node
-      let nodeHtml;
-      if (e.attribute === "src" || e.attribute === "href" || e.attribute === "datetime" || e.attribute === "value") {
-        const safeVal = String(sample).replace(/"/g, "&quot;").substring(0, 200);
-        if (e.tag === "img") {
-          nodeHtml = "<img" + cls + dataPath + " src=\"" + safeVal + "\" />";
-        } else {
-          nodeHtml = "<" + e.tag + cls + dataPath + " " + e.attribute + "=\"" + safeVal + "\"></" + e.tag + ">";
-        }
-      } else {
-        const safeText = String(sample).replace(/[<>&]/g, function (c) {
-          return c === "<" ? "&lt;" : c === ">" ? "&gt;" : "&amp;";
-        }).substring(0, 200);
-        nodeHtml = "<" + e.tag + cls + dataPath + ">" + safeText + "</" + e.tag + ">";
-      }
-      htmlParts.push(nodeHtml);
-
-      // Build a class-based CSS selector for matching AI output back to a leaf
-      let sel = e.tag;
+    // Build the fields (leaves) array from unique signatures
+    const entriesArr = Array.from(bySig.values());
+    const fields = entriesArr.map(function (e) {
+      var sel = e.tag;
       if (e.classes.length) {
         try { sel += "." + e.classes.map(function (c) { return CSS.escape(c); }).join("."); }
         catch (_) { sel += "." + e.classes.join("."); }
       }
-      fields.push({
+      return {
         selector: sel,
         fallbackSelector: e.fallbackSelector || "",
         attribute: e.attribute,
-        dataType: dataType,
+        dataType: _detectDataType(e.values[0] || "", e.attribute),
         sampleValues: e.values.slice(),
         occurrenceFraction: e.count / items.length,
-      });
-    }
-
-    const html = "<div class=\"jaal-super-item\">" + htmlParts.join("") + "</div>";
+      };
+    });
 
     if (fields.length === 0) {
       console.warn("[Jaal.htmlExtractor] buildSyntheticSuperItem — 0 fields found across " +
         items.length + " items! First item outerHTML preview:", items[0].outerHTML.slice(0, 600));
+      return { html: "<div class=\"jaal-super-item\"></div>", htmlBlocks: [], fieldCount: 0, itemCount: items.length, leaves: [] };
     }
-    console.log("[Jaal.htmlExtractor] buildSyntheticSuperItem — done items=" + items.length
-      + " uniqueFields=" + fields.length);
 
-    return { html: html, fieldCount: fields.length, itemCount: items.length, leaves: fields };
+    // Emit up to 3 synthetic blocks, each using a different sample value per field.
+    // The AI sees realistic value variation across blocks, enabling better semantic inference.
+    var numBlocks = Math.min(3, Math.max(1, items.length));
+    var htmlBlocks = [];
+    for (var blockIdx = 0; blockIdx < numBlocks; blockIdx++) {
+      var blockParts = entriesArr.map(function (e) {
+        return _buildSuperItemNode(e, e.values[blockIdx] || e.values[0] || "");
+      });
+      htmlBlocks.push("<div class=\"jaal-super-item\" data-sample=\"" + blockIdx + "\">" + blockParts.join("") + "</div>");
+    }
+    var html = htmlBlocks.join("\n");
+
+    console.log("[Jaal.htmlExtractor] buildSyntheticSuperItem — done items=" + items.length
+      + " uniqueFields=" + fields.length + " blocks=" + htmlBlocks.length);
+
+    return { html: html, htmlBlocks: htmlBlocks, fieldCount: fields.length, itemCount: items.length, leaves: fields };
   }
 
   ns.htmlExtractor = {

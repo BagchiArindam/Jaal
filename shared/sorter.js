@@ -182,6 +182,26 @@
 
   // --- Sort ---
 
+  // For each original item record the first non-item sibling following it ("anchor").
+  // After detaching all items, reinsert sorted items before their slot's anchor.
+  // Non-item siblings (brand spotlights, ad rows, row-wrapper divs) are never moved.
+  // Works for both 1D containers with mixed siblings and 2D-matrix row-wrapper layouts.
+  function _anchorReinsert(originalItems, sortedItems) {
+    const itemSet = new Set(originalItems);
+    const slots = originalItems.map(function (it) {
+      let anchor = it.nextSibling;
+      while (anchor && itemSet.has(anchor)) anchor = anchor.nextSibling;
+      return { parent: it.parentElement, anchor: anchor };
+    });
+    originalItems.forEach(function (el) { el.remove(); });
+    for (var i = 0; i < slots.length; i++) {
+      var s = slots[i];
+      if (s.parent && s.parent.isConnected) {
+        s.parent.insertBefore(sortedItems[i], s.anchor || null);
+      }
+    }
+  }
+
   function sortElements(container, itemSelector, columnDef, direction) {
     saveOriginalOrder(container, itemSelector);
     const items = safeQSA(container, itemSelector);
@@ -191,9 +211,7 @@
       return { element: item, value: value };
     });
     pairs.sort(function (a, b) { return compare(a.value, b.value, direction); });
-    const frag = document.createDocumentFragment();
-    pairs.forEach(function (p) { frag.appendChild(p.element); });
-    container.appendChild(frag);
+    _anchorReinsert(items, pairs.map(function (p) { return p.element; }));
     log.info("sort_applied", { phase: "mutate", col: columnDef.name, direction: direction, count: pairs.length });
   }
 

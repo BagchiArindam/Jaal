@@ -82,7 +82,11 @@
 
     } else if (msg.type === "jaal-open-modal") {
       log.info("open_modal", { phase: "mutate" });
-      if (Jaal.modal) {
+      if (Jaal.modal && Jaal._activeToolbars.size > 0) {
+        // Already have active toolbars — just surface the modal
+        Jaal.modal.openOrFocus();
+      } else if (Jaal.modal) {
+        // No active toolbars yet — will be handled by jaal-auto-activate-multi sent after this
         Jaal.modal.openOrFocus();
       } else {
         console.warn("[Jaal content-main] jaal-open-modal received but Jaal.modal not loaded");
@@ -162,15 +166,27 @@
       superItem = Jaal.htmlExtractor.buildSyntheticSuperItem(parentAnalysis.items);
 
       if (superItem.fieldCount > 0) {
-        samples = [superItem.html];
+        // Send up to 3 synthetic blocks so AI sees value variation across items
+        samples = superItem.htmlBlocks && superItem.htmlBlocks.length > 0
+          ? superItem.htmlBlocks
+          : [superItem.html];
+        const directChildren = Array.from(containerEl.children);
+        const tagCounts = {};
+        directChildren.forEach(function (c) {
+          var t = c.tagName || "#";
+          tagCounts[t] = (tagCounts[t] || 0) + 1;
+        });
         metadata = {
           url: window.location.href,
           containerTag: containerEl.tagName.toLowerCase(),
           containerClasses: containerEl.className || "",
           containerId: containerEl.id || "",
+          totalChildren: directChildren.length,
           totalItems: parentAnalysis.items.length,
           itemSelector: parentAnalysis.itemSelector,
           layout: parentAnalysis.layout,
+          unwrappedGrid: parentAnalysis.layout === "2D-matrix",
+          childTagDistribution: tagCounts,
           fieldCount: superItem.fieldCount,
           superItem: true,
         };
@@ -178,6 +194,7 @@
           phase: "load",
           items: parentAnalysis.items.length,
           fields: superItem.fieldCount,
+          blocks: samples.length,
           layout: parentAnalysis.layout,
         });
       } else {
@@ -262,8 +279,7 @@
         );
         Jaal._activeToolbars.set(key, inst);
         if (Jaal.modal) {
-          Jaal.modal.openOrFocus();
-          Jaal.modal.addToolbarTab(inst);
+          Jaal.modal.addToolbarTab(inst); // also calls _ensureCreated + shows modal
         }
         inst.onClose(function () {
           Jaal._activeToolbars.delete(key);
@@ -490,7 +506,6 @@
       );
       Jaal._activeToolbars.set(key, inst);
       if (Jaal.modal) {
-        Jaal.modal.openOrFocus();
         Jaal.modal.addToolbarTab(inst);
       }
       inst.onClose(function () {

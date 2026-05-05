@@ -1261,6 +1261,7 @@
       _shadowRoot = null;
       const idx = _instances.indexOf(instance);
       if (idx >= 0) _instances.splice(idx, 1);
+      if (_closeCb) { var cb = _closeCb; _closeCb = null; cb(); }
       log.info && log.info("destroyed", { phase: "teardown" });
     }
 
@@ -1302,6 +1303,11 @@
     };
     _instances.push(instance);
     const _instanceIndex = _instances.length - 1;
+
+    // Tell the modal where to appear when it first opens (near the picked element).
+    if (nearElement && ns.modal && ns.modal.setPreferredPos) {
+      ns.modal.setPreferredPos(nearElement);
+    }
 
     _hostEl = document.createElement("div");
     _hostEl.style.cssText = "position:fixed;top:" + _stackTop(_instanceIndex) + "px;right:20px;z-index:2147483647";

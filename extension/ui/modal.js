@@ -33,14 +33,13 @@
   let _minimized   = false;
   let _tabs        = []; // { id, btn, panel, inst? }
   let _activeTabId = null;
+  let _preferredPos = null; // { left, top } set before first open
 
   const MODAL_CSS = `
 :host {
   all: initial;
   display: block !important;
   position: fixed !important;
-  bottom: 20px !important;
-  right: 20px !important;
   z-index: 2147483646 !important;
   font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif !important;
   font-size: 13px !important;
@@ -187,7 +186,14 @@
     closeBtn.className = "jm-hbtn";
     closeBtn.title = "Close Jaal panel";
     closeBtn.textContent = "✕";
-    closeBtn.addEventListener("click", function () { _hostEl.style.display = "none"; });
+    closeBtn.addEventListener("click", function () {
+      // Destroy all toolbar instances before removing the modal
+      var toDestroy = _tabs.filter(function (t) { return t.inst && t.inst.destroy; }).map(function (t) { return t.inst; });
+      _tabs = []; _activeTabId = null;
+      if (_hostEl) { _hostEl.remove(); _hostEl = null; }
+      _shadowRoot = null; _tabbar = null; _body = null; _minimized = false;
+      toDestroy.forEach(function (inst) { try { inst.destroy(); } catch (_) {} });
+    });
     header.appendChild(closeBtn);
 
     modal.appendChild(header);
@@ -203,6 +209,15 @@
     _setupDrag(header);
 
     document.body.appendChild(_hostEl);
+
+    // Position: use preferred position if set (near picked element), else default bottom-right
+    if (_preferredPos) {
+      _hostEl.style.left   = _preferredPos.left + "px";
+      _hostEl.style.top    = _preferredPos.top  + "px";
+    } else {
+      _hostEl.style.right  = "20px";
+      _hostEl.style.bottom = "20px";
+    }
     console.log("[Jaal modal] created");
   }
 
@@ -599,7 +614,27 @@
 
   // ─── Public API ─────────────────────────────────────────────────────────
 
+  // Compute a good display position near a picked DOM element and store for first open.
+  function _computePosNear(nearElement) {
+    try {
+      const rect = nearElement.getBoundingClientRect();
+      if (rect.right <= 0 || rect.left >= window.innerWidth) return null;
+      const top  = Math.max(20, Math.min(rect.top, window.innerHeight - 300));
+      const left = rect.left > window.innerWidth / 2
+        ? Math.max(10, rect.left - 560)
+        : Math.min(rect.right + 16, window.innerWidth - 560);
+      return { left: left, top: top };
+    } catch (_) { return null; }
+  }
+
   ns.modal = {
+    // Call before the first addToolbarTab so the modal appears near the picked element.
+    setPreferredPos: function (nearElement) {
+      if (!nearElement) return;
+      var pos = _computePosNear(nearElement);
+      if (pos) { _preferredPos = pos; }
+    },
+
     openOrFocus: function () {
       _ensureCreated();
       _hostEl.style.display = "";

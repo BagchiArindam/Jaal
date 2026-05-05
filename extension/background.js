@@ -370,11 +370,41 @@ B.runtime.onMessage.addListener(function (msg, sender, sendResponse) {
   if (msg.type === "jaal-open-modal") {
     const tabId = (typeof msg.tabId === "number") ? msg.tabId
                 : (sender && sender.tab && sender.tab.id);
-    if (typeof tabId === "number") {
-      _injectFiles(tabId, PICKER_FILES, "jaal-open-modal");
-    } else {
+    if (typeof tabId !== "number") {
       console.warn(LOG_TAG, "jaal-open-modal: no tabId resolved");
+      return false;
     }
+    // Inject picker files, then open modal and re-send matching configs so
+    // toolbars are (re-)spawned when the user opens the panel from popup.
+    _injectFiles(tabId, PICKER_FILES, null);
+    B.tabs.get(tabId, function (tab) {
+      if (!tab || !tab.url) {
+        _sendToTabWithRetry(tabId, { type: "jaal-open-modal" });
+        return;
+      }
+      let url;
+      try { url = new URL(tab.url); } catch (_) {
+        _sendToTabWithRetry(tabId, { type: "jaal-open-modal" });
+        return;
+      }
+      B.storage.local.get("jaal_configs", function (result) {
+        const configs = Array.isArray(result && result.jaal_configs) ? result.jaal_configs : [];
+        const path = url.pathname.replace(/\/+$/, "") || "/";
+        const matches = configs.filter(function (c) {
+          if (!c || !c.domain || !c.parentSelector) return false;
+          if (c.domain !== url.hostname) return false;
+          return _globMatches(c.pathPattern || "*", path)
+              || _globMatches(c.pathPattern || "*", url.pathname);
+        });
+        if (matches.length > 0) {
+          // Re-spawn matching toolbar configs + show modal
+          _sendToTabWithRetry(tabId, { type: "jaal-auto-activate-multi", configs: matches }, 8, 150);
+        } else {
+          // No matching configs — just open the modal (user can use Patterns tab)
+          _sendToTabWithRetry(tabId, { type: "jaal-open-modal" });
+        }
+      });
+    });
     return false;
   }
 
