@@ -132,7 +132,7 @@
 
   // Filter out "aberrant" siblings — items with far fewer leaves than the median
   // (brand spotlights, carousels, ad blocks). Primary filter: class-fingerprint
-  // majority (≥50% items share the same class set). Fallback: two-sided leaf-count.
+  // majority (≥35% items share the same class set). Fallback: strict two-sided leaf-count.
   function _filterAberrantSiblings(items) {
     if (items.length <= 2) return items;
 
@@ -151,8 +151,8 @@
       if (fpCount[fp] > dominantCount) { dominantFp = fp; dominantCount = fpCount[fp]; }
     });
 
-    // If ≥50% of items share the dominant fingerprint, keep only those.
-    if (dominantCount >= Math.ceil(items.length * 0.5)) {
+    // If ≥35% of items share the dominant fingerprint, keep only those (lowered threshold for heterogeneous 1D).
+    if (dominantCount >= Math.max(3, Math.ceil(items.length * 0.35))) {
       var byClass = items.filter(function (_, i) { return fingerprints[i] === dominantFp; });
       if (byClass.length < items.length) {
         console.log("[Jaal.htmlExtractor] _filterAberrantSiblings — rejected " +
@@ -161,13 +161,14 @@
       return byClass;
     }
 
-    // Fallback: two-sided leaf-count filter.
+    // Fallback: strict two-sided leaf-count filter.
     var leafCounts = items.map(function (item) { return _gatherLeaves(item).length; });
     var sorted = leafCounts.slice().sort(function (a, b) { return a - b; });
     var median = sorted[Math.floor(sorted.length / 2)];
     if (median === 0) return items;
-    var lo = Math.max(1, Math.floor(median * 0.3));
-    var hi = Math.ceil(median * 2.5);
+    // Stricter bounds: 40%-200% of median (was 30%-250%). Reduces false positives.
+    var lo = Math.max(1, Math.floor(median * 0.4));
+    var hi = Math.ceil(median * 2.0);
     var byLeaf = items.filter(function (_, i) { return leafCounts[i] >= lo && leafCounts[i] <= hi; });
     if (byLeaf.length === 0) return items;
     if (byLeaf.length < items.length) {

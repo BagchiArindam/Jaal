@@ -112,6 +112,27 @@
       calls.push(call);
     }
 
+    // Check if URL should be intercepted. Skip third-party analytics.
+    function _shouldIntercept(url) {
+      if (!url) return true;
+      try {
+        const pageOrigin = _w.location.origin;
+        const reqUrl = new URL(url, pageOrigin);
+        const reqOrigin = reqUrl.origin;
+        // Only intercept same-origin requests; skip third-party analytics
+        if (reqOrigin !== pageOrigin) {
+          const host = reqUrl.hostname;
+          // Skip known analytics/tracking domains
+          if (/analytics\.|tracking\.|cdn\.|google-analytics|newrelic|segment|hotjar|crash|sentry|bugsnag|awswaf/i.test(host)) {
+            return false;
+          }
+        }
+        return true;
+      } catch (_) {
+        return true; // If URL parsing fails, allow it (relative URL, etc.)
+      }
+    }
+
     // ─── fetch ────────────────────────────────────────────────────────
 
     function _installFetch() {
@@ -124,6 +145,12 @@
             : input instanceof URL ? input.href
             : (input && input.url) || String(input);
         } catch (_) {}
+
+        // Skip third-party analytics requests — pass through to original fetch
+        if (!_shouldIntercept(url)) {
+          return _origFetch(input, init);
+        }
+
         const method  = (init && init.method) || (input && typeof input === "object" && input.method) || "GET";
         const headers = _headersToObj((init && init.headers) || (input && typeof input === "object" && input.headers));
         const ct      = headers["content-type"] || headers["Content-Type"] || "";
@@ -177,6 +204,11 @@
       };
 
       _w.XMLHttpRequest.prototype.send = function (body) {
+        // Skip third-party analytics requests
+        if (!_shouldIntercept(this._nh_url)) {
+          return _origXhrSend.call(this, body);
+        }
+
         const ct  = (this._nh_headers && (this._nh_headers["content-type"] || this._nh_headers["Content-Type"])) || "";
         const enc = _encodeBody(body, ct);
         const call = {
@@ -237,10 +269,11 @@
       }
       PatchedWebSocket.prototype = _origWS.prototype;
       Object.setPrototypeOf(PatchedWebSocket, _origWS);
-      PatchedWebSocket.CONNECTING = _origWS.CONNECTING;
-      PatchedWebSocket.OPEN       = _origWS.OPEN;
-      PatchedWebSocket.CLOSING    = _origWS.CLOSING;
-      PatchedWebSocket.CLOSED     = _origWS.CLOSED;
+      // Copy read-only WebSocket state constants using defineProperty
+      Object.defineProperty(PatchedWebSocket, 'CONNECTING', { value: _origWS.CONNECTING, writable: false });
+      Object.defineProperty(PatchedWebSocket, 'OPEN',       { value: _origWS.OPEN,       writable: false });
+      Object.defineProperty(PatchedWebSocket, 'CLOSING',    { value: _origWS.CLOSING,    writable: false });
+      Object.defineProperty(PatchedWebSocket, 'CLOSED',     { value: _origWS.CLOSED,     writable: false });
       _w.WebSocket = PatchedWebSocket;
     }
 
