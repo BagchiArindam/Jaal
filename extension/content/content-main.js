@@ -233,6 +233,13 @@
       if (runId) console.log("[Jaal] runId=" + runId);
       delete analysis.runId;
 
+      // Strip any jaal-* class from the AI's itemSelector (e.g. ".jaal-super-item"
+      // only exists in the synthetic prompt artifact, not in the real DOM).
+      if (analysis.itemSelector && /\bjaal-/.test(analysis.itemSelector)) {
+        console.warn("[Jaal] AI leaked synthetic class into itemSelector — discarding:", analysis.itemSelector);
+        delete analysis.itemSelector;
+      }
+
       // Prefer the deterministic itemSelector from analyzeParent — the server
       // only saw the synthetic super-item and can't infer the real DOM's
       // repeating-unit selector.

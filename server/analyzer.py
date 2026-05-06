@@ -35,6 +35,9 @@ Direct children: {total_children}, dominant child tag: <{dominant_tag}>{grid_not
 Note: the input sample below is a SYNTHETIC union element whose direct children are
 representative leaf nodes from ALL real repeating items. It is NOT a real item.
 Selectors you return must match elements inside ONE real item, not the synthetic root div.
+IMPORTANT: The synthetic wrapper has the CSS class "jaal-super-item" which does NOT exist
+in the real page DOM. Never use ".jaal-super-item" or any selector containing a "jaal-"
+class for itemSelector or any column selector — they will match nothing on the live page.
 
 Below are {sample_count} representative item samples. Return a JSON object shaped as:
 
