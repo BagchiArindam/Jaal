@@ -381,6 +381,33 @@
       _updateCount(toolbar);
     }
 
+    // Inline rename for a column name element.
+    function _startRename(nameEl, colIdx) {
+      if (nameEl.querySelector("input")) return; // already renaming
+      const current = _columns[colIdx] ? _columns[colIdx].name : nameEl.textContent.trim();
+      const input = document.createElement("input");
+      input.type = "text";
+      input.value = current;
+      input.className = "jaal-rename-input";
+      input.style.cssText = "width:100%;box-sizing:border-box;font:inherit;border:1px solid #888;border-radius:2px;padding:1px 3px;background:#fff;color:#111;";
+      nameEl.textContent = "";
+      nameEl.appendChild(input);
+      input.focus();
+      input.select();
+      function commit() {
+        const newName = input.value.trim() || current;
+        if (_columns[colIdx]) _columns[colIdx].name = newName;
+        nameEl.textContent = newName;
+        _updateConfigInStorage({ columns: _columns });
+        console.log("[Jaal.toolbar] renamed col", colIdx, "→", newName);
+      }
+      input.addEventListener("blur", commit);
+      input.addEventListener("keydown", function (e) {
+        if (e.key === "Enter") { e.preventDefault(); input.blur(); }
+        if (e.key === "Escape") { input.value = current; input.blur(); }
+      });
+    }
+
     // Wire events for a single column row (used by initial setup and + Field).
     function _wireColumnRow(row, colIdx, col, toolbar) {
       row.querySelectorAll(".jaal-sort-btn").forEach(function (btn) {
@@ -451,6 +478,11 @@
           nameEl.classList.remove("hl-active");
           _highlightField(col, false);
         });
+        nameEl.addEventListener("dblclick", function (e) {
+          e.stopPropagation();
+          _startRename(nameEl, colIdx);
+        });
+        nameEl.title = "Double-click to rename";
       }
     }
 
@@ -483,6 +515,11 @@
           nameEl.classList.remove("hl-active");
           _highlightField(col, false);
         });
+        nameEl.addEventListener("dblclick", function (e) {
+          e.stopPropagation();
+          _startRename(nameEl, colIdx);
+        });
+        nameEl.title = "Double-click to rename";
       });
     }
 
@@ -965,7 +1002,12 @@
             if (columnsDiv) {
               columnsDiv.insertAdjacentHTML("beforeend", _buildColumnRow(newCol, colIdx));
               const newRow = columnsDiv.querySelector(".jaal-column[data-col-index=\"" + colIdx + "\"]");
-              if (newRow) _wireColumnRow(newRow, colIdx, newCol, toolbar);
+              if (newRow) {
+                _wireColumnRow(newRow, colIdx, newCol, toolbar);
+                // Prompt user to rename the auto-inferred field name immediately.
+                const newNameEl = newRow.querySelector(".jaal-col-name");
+                if (newNameEl) setTimeout(function () { _startRename(newNameEl, colIdx); }, 50);
+              }
             }
 
             _updateStatus(toolbar);

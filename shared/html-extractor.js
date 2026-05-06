@@ -130,34 +130,51 @@
     return null;
   }
 
-  // Filter out "aberrant" siblings — children whose leaf-signature Jaccard similarity
-  // to the median item is below threshold. Removes brand-spotlight rows, carousels,
-  // and ad blocks that appear as siblings of real product cards.
+  // Filter out "aberrant" siblings — items with far fewer leaves than the median
+  // (brand spotlights, carousels, ad blocks). Primary filter: class-fingerprint
+  // majority (≥50% items share the same class set). Fallback: two-sided leaf-count.
   function _filterAberrantSiblings(items) {
     if (items.length <= 2) return items;
-    var sigSets = items.map(function (item) {
-      var leaves = _gatherLeaves(item);
-      var s = new Set(leaves.map(function (l) { return _signature(l); }));
-      return s;
+
+    // Primary: class-fingerprint majority filter.
+    // Compute CSS class fingerprint (sorted, deduplicated, non-jaal classes).
+    var fingerprints = items.map(function (item) {
+      var cls = (typeof item.className === "string")
+        ? item.className.trim().split(/\s+/).filter(function (c) { return c && !c.startsWith("jaal-"); }).sort()
+        : [];
+      return cls.join("|");
     });
-    // Use median item as reference
-    var refSet = sigSets[Math.floor(sigSets.length / 2)];
-    if (refSet.size === 0) return items;
-    var filtered = items.filter(function (_, i) {
-      var s = sigSets[i];
-      if (s.size === 0) return false;
-      var intersection = 0;
-      s.forEach(function (sig) { if (refSet.has(sig)) intersection++; });
-      var union = s.size + refSet.size - intersection;
-      var jaccard = intersection / union;
-      return jaccard >= 0.15; // lenient: brand spotlights score near 0, product cards score >0.3
+    var fpCount = Object.create(null);
+    fingerprints.forEach(function (fp) { fpCount[fp] = (fpCount[fp] || 0) + 1; });
+    var dominantFp = null, dominantCount = 0;
+    Object.keys(fpCount).forEach(function (fp) {
+      if (fpCount[fp] > dominantCount) { dominantFp = fp; dominantCount = fpCount[fp]; }
     });
-    if (filtered.length === 0) return items; // safety net
-    if (filtered.length < items.length) {
-      console.log("[Jaal.htmlExtractor] _filterAberrantSiblings — rejected " +
-        (items.length - filtered.length) + " outlier sibling(s)");
+
+    // If ≥50% of items share the dominant fingerprint, keep only those.
+    if (dominantCount >= Math.ceil(items.length * 0.5)) {
+      var byClass = items.filter(function (_, i) { return fingerprints[i] === dominantFp; });
+      if (byClass.length < items.length) {
+        console.log("[Jaal.htmlExtractor] _filterAberrantSiblings — rejected " +
+          (items.length - byClass.length) + " outlier sibling(s) by class (majority=" + dominantCount + "/" + items.length + ")");
+      }
+      return byClass;
     }
-    return filtered;
+
+    // Fallback: two-sided leaf-count filter.
+    var leafCounts = items.map(function (item) { return _gatherLeaves(item).length; });
+    var sorted = leafCounts.slice().sort(function (a, b) { return a - b; });
+    var median = sorted[Math.floor(sorted.length / 2)];
+    if (median === 0) return items;
+    var lo = Math.max(1, Math.floor(median * 0.3));
+    var hi = Math.ceil(median * 2.5);
+    var byLeaf = items.filter(function (_, i) { return leafCounts[i] >= lo && leafCounts[i] <= hi; });
+    if (byLeaf.length === 0) return items;
+    if (byLeaf.length < items.length) {
+      console.log("[Jaal.htmlExtractor] _filterAberrantSiblings — rejected " +
+        (items.length - byLeaf.length) + " outlier sibling(s) by leaf count (median=" + median + ", range=[" + lo + "," + hi + "])");
+    }
+    return byLeaf;
   }
 
   function extractMinimalHTML(containerElement, sampleCount = 3, hintElement = null) {
