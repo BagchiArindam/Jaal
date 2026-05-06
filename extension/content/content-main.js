@@ -162,7 +162,7 @@
         && Jaal.htmlExtractor.buildSyntheticSuperItem) {
       // New flow (Tier 5): walk every item's leaves, send a single synthetic
       // super-item to the AI so missing-field cases are eliminated.
-      parentAnalysis = Jaal.htmlExtractor.analyzeParent(containerEl);
+      parentAnalysis = Jaal.htmlExtractor.analyzeParent(containerEl, hintEl);
       superItem = Jaal.htmlExtractor.buildSyntheticSuperItem(parentAnalysis.items);
 
       if (superItem.fieldCount > 0) {

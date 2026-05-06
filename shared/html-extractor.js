@@ -132,7 +132,7 @@
 
   // Filter out "aberrant" siblings — items with far fewer leaves than the median
   // (brand spotlights, carousels, ad blocks). Primary filter: class-fingerprint
-  // majority (≥35% items share the same class set). Fallback: strict two-sided leaf-count.
+  // majority (≥50% items share the same class set). Fallback: two-sided leaf-count.
   function _filterAberrantSiblings(items) {
     if (items.length <= 2) return items;
 
@@ -151,8 +151,8 @@
       if (fpCount[fp] > dominantCount) { dominantFp = fp; dominantCount = fpCount[fp]; }
     });
 
-    // If ≥35% of items share the dominant fingerprint, keep only those (lowered threshold for heterogeneous 1D).
-    if (dominantCount >= Math.max(3, Math.ceil(items.length * 0.35))) {
+    // If ≥50% of items share the dominant fingerprint, keep only those.
+    if (dominantCount >= Math.ceil(items.length * 0.5)) {
       var byClass = items.filter(function (_, i) { return fingerprints[i] === dominantFp; });
       if (byClass.length < items.length) {
         console.log("[Jaal.htmlExtractor] _filterAberrantSiblings — rejected " +
@@ -161,14 +161,13 @@
       return byClass;
     }
 
-    // Fallback: strict two-sided leaf-count filter.
+    // Fallback: two-sided leaf-count filter.
     var leafCounts = items.map(function (item) { return _gatherLeaves(item).length; });
     var sorted = leafCounts.slice().sort(function (a, b) { return a - b; });
     var median = sorted[Math.floor(sorted.length / 2)];
     if (median === 0) return items;
-    // Stricter bounds: 40%-200% of median (was 30%-250%). Reduces false positives.
-    var lo = Math.max(1, Math.floor(median * 0.4));
-    var hi = Math.ceil(median * 2.0);
+    var lo = Math.max(1, Math.floor(median * 0.3));
+    var hi = Math.ceil(median * 2.5);
     var byLeaf = items.filter(function (_, i) { return leafCounts[i] >= lo && leafCounts[i] <= hi; });
     if (byLeaf.length === 0) return items;
     if (byLeaf.length < items.length) {
@@ -271,7 +270,7 @@
     return tag;
   }
 
-  function analyzeParent(parent) {
+  function analyzeParent(parent, hintEl) {
     if (!parent || parent.nodeType !== 1) {
       console.warn("[Jaal.htmlExtractor] analyzeParent — invalid parent node");
       return { layout: "1D", items: [], itemSelector: "" };
@@ -283,7 +282,7 @@
     }
 
     console.log("[Jaal.htmlExtractor] analyzeParent — start tag=" + parent.tagName.toLowerCase()
-      + " directChildren=" + directChildren.length);
+      + " directChildren=" + directChildren.length + " hintEl=" + (hintEl ? hintEl.tagName : "none"));
 
     const unwrapped = unwrapToRepeatingItems(directChildren);
     let items = unwrapped || directChildren;
@@ -301,9 +300,40 @@
       items = directChildren;
     }
 
-    // Filter out aberrant siblings (ads, carousels, brand spotlights) whose
-    // leaf-signature Jaccard similarity vs the median item is < 0.15.
-    items = _filterAberrantSiblings(items);
+    // Hint-guided filter: if the user clicked a specific product card (hintEl),
+    // use it as the reference for what a valid item looks like (same tag + leaf count ±40%).
+    // Falls back to class-fingerprint / leaf-count heuristics when hint is unavailable.
+    if (hintEl && parent.contains(hintEl)) {
+      var hintItem = null;
+      for (var hi = 0; hi < items.length; hi++) {
+        if (items[hi] === hintEl || items[hi].contains(hintEl)) { hintItem = items[hi]; break; }
+      }
+      if (hintItem) {
+        var hintLeaves = _gatherLeaves(hintItem).length;
+        var hintTag    = hintItem.tagName;
+        var hLo = Math.max(1, Math.floor(hintLeaves * 0.60));
+        var hHi = Math.ceil(hintLeaves * 1.40);
+        var byHint = items.filter(function (item) {
+          var lc = _gatherLeaves(item).length;
+          return item.tagName === hintTag && lc >= hLo && lc <= hHi;
+        });
+        if (byHint.length >= 3) {
+          console.log("[Jaal.htmlExtractor] analyzeParent — hint-guided filter: kept " +
+            byHint.length + "/" + items.length + " items (hint leaves=" + hintLeaves +
+            ", range=[" + hLo + "," + hHi + "])");
+          items = byHint;
+        } else {
+          console.log("[Jaal.htmlExtractor] analyzeParent — hint filter too strict (" +
+            byHint.length + " items), falling back to _filterAberrantSiblings");
+          items = _filterAberrantSiblings(items);
+        }
+      } else {
+        console.log("[Jaal.htmlExtractor] analyzeParent — hintEl not found in items array, using _filterAberrantSiblings");
+        items = _filterAberrantSiblings(items);
+      }
+    } else {
+      items = _filterAberrantSiblings(items);
+    }
 
     const itemSelector = _itemSelectorFor(items);
 
