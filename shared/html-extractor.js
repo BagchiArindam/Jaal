@@ -285,12 +285,28 @@
       + " directChildren=" + directChildren.length + " hintEl=" + (hintEl ? hintEl.tagName : "none"));
 
     const unwrapped = unwrapToRepeatingItems(directChildren);
-    let items = unwrapped || directChildren;
-    const layout = unwrapped ? "2D-matrix" : "1D";
+    let layout = "1D";
+    let items = directChildren;
+    let rowWrapperSelector = null;
 
     if (unwrapped) {
-      console.log("[Jaal.htmlExtractor] analyzeParent — 2D-matrix: unwrapped " +
-        directChildren.length + " direct children → " + items.length + " inner items");
+      // Validate the unwrap: accept as 2D-matrix only if inner items have ≥ 2 leaves on average.
+      // If they are degenerate (e.g. ad slots collapsed to a single span), fall back to 1D.
+      const totalLeaves = unwrapped.reduce(function(sum, it) { return sum + _gatherLeaves(it).length; }, 0);
+      const avgLeaves = unwrapped.length ? totalLeaves / unwrapped.length : 0;
+      if (avgLeaves >= 2) {
+        layout = "2D-matrix";
+        items = unwrapped;
+        // rowWrapperSelector: the direct-child element that wraps the inner items.
+        // Use the first direct child's tag + common classes as a reference selector.
+        rowWrapperSelector = _itemSelectorFor(directChildren);
+        console.log("[Jaal.htmlExtractor] analyzeParent — 2D-matrix: unwrapped " +
+          directChildren.length + " direct children → " + items.length + " inner items" +
+          " avgLeaves=" + avgLeaves.toFixed(1) + " rowWrapperSelector=" + rowWrapperSelector);
+      } else {
+        console.log("[Jaal.htmlExtractor] analyzeParent — unwrap produced degenerate items (avgLeaves=" +
+          avgLeaves.toFixed(1) + "), falling back to 1D");
+      }
     } else {
       console.log("[Jaal.htmlExtractor] analyzeParent — 1D: " + items.length + " direct items");
     }
@@ -338,9 +354,10 @@
     const itemSelector = _itemSelectorFor(items);
 
     console.log("[Jaal.htmlExtractor] analyzeParent — done layout=" + layout
-      + " items=" + items.length + " itemSelector=" + itemSelector);
+      + " items=" + items.length + " itemSelector=" + itemSelector
+      + (rowWrapperSelector ? " rowWrapperSelector=" + rowWrapperSelector : ""));
 
-    return { layout: layout, items: items, itemSelector: itemSelector };
+    return { layout: layout, items: items, itemSelector: itemSelector, rowWrapperSelector: rowWrapperSelector };
   }
 
   // ─── buildSyntheticSuperItem ─────────────────────────────────────────────
@@ -391,6 +408,7 @@
 
   // Walk an item's tree, emit { tag, classes, attribute, value, fallbackSelector } for each leaf.
   // fallbackSelector is a :scope-relative path usable to re-find this leaf inside a real item.
+  var _SKIP_TAGS = { script: 1, style: 1, noscript: 1, template: 1, iframe: 1, svg: 1 };
   function _gatherLeaves(itemRoot) {
     const leaves = [];
     // relParts = CSS steps from itemRoot's direct children down to (and including) current node.
@@ -398,6 +416,10 @@
     function visit(node, relParts) {
       if (!node || node.nodeType !== 1) return;
       const tag = node.tagName.toLowerCase();
+      // Skip non-content structural nodes and hidden elements
+      if (_SKIP_TAGS[tag]) return;
+      if (node.getAttribute && node.getAttribute("aria-hidden") === "true") return;
+      if (node.hidden) return;
 
       const fallbackSelector = relParts.length === 0
         ? ""
@@ -486,8 +508,11 @@
       }
     }
 
-    // Build the fields (leaves) array from unique signatures
+    // Build the fields (leaves) array from unique signatures.
+    // Sort by occurrence frequency (most common fields first) and cap at 25 to prevent prompt bloat.
     const entriesArr = Array.from(bySig.values());
+    entriesArr.sort(function(a, b) { return b.count - a.count; });
+    if (entriesArr.length > 25) entriesArr.splice(25);
     const fields = entriesArr.map(function (e) {
       var sel = e.tag;
       if (e.classes.length) {
@@ -512,6 +537,7 @@
 
     // Emit up to 3 synthetic blocks, each using a different sample value per field.
     // The AI sees realistic value variation across blocks, enabling better semantic inference.
+    // entriesArr is already sorted by frequency and capped at 25 fields.
     var numBlocks = Math.min(3, Math.max(1, items.length));
     var htmlBlocks = [];
     for (var blockIdx = 0; blockIdx < numBlocks; blockIdx++) {

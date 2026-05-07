@@ -385,7 +385,7 @@
     const overlay = document.createElement("div");
     overlay.id = OVERLAY_ID;
     overlay.style.cssText = [
-      "position:fixed; top:12px; right:12px; z-index:2147483647;",
+      "position:fixed; top:12px; right:12px; z-index:2147483646;",
       "width:520px; max-height:82vh;",
       "background:#1e1e2e; color:#cdd6f4;",
       "font-family:'Cascadia Code','Fira Code','Consolas',monospace; font-size:12px;",
@@ -603,7 +603,23 @@
     removeOverlay();
   }
 
+  function setMode(modeVal) {
+    if (!["tree", "overlay", "panel"].includes(modeVal)) return;
+    _mode = modeVal;
+    const overlay = document.getElementById(OVERLAY_ID);
+    if (overlay) {
+      // Overlay already shown — switch mode in-place by clicking the mode button if visible
+      const modeBtn = overlay.querySelector("[data-mode=\"" + modeVal + "\"]");
+      if (modeBtn) { modeBtn.click(); return; }
+      if (modeVal === "overlay") _showOverlayMode();
+      else if (modeVal === "panel") _showPanelMode();
+    } else {
+      // Show fresh with the requested mode
+      show();
+    }
+  }
+
   _root.Jaal = _root.Jaal || {};
-  _root.Jaal.skeletonOverlay = { show, hide };
+  _root.Jaal.skeletonOverlay = { show, hide, setMode };
   console.log("[Jaal] skeleton-overlay loaded");
 })();

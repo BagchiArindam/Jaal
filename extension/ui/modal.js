@@ -29,9 +29,10 @@
   let _hostEl      = null;
   let _shadowRoot  = null;
   let _tabbar      = null;
+  let _subheader   = null;
   let _body        = null;
   let _minimized   = false;
-  let _tabs        = []; // { id, btn, panel, inst? }
+  let _tabs        = []; // { id, btn, panel, inst?, subheaderDefs? }
   let _activeTabId = null;
   let _preferredPos = null; // { left, top } set before first open
 
@@ -40,7 +41,7 @@
   all: initial;
   display: block !important;
   position: fixed !important;
-  z-index: 2147483646 !important;
+  z-index: 2147483647 !important;
   font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif !important;
   font-size: 13px !important;
 }
@@ -49,7 +50,7 @@
   border: 1px solid #d1d5db;
   border-radius: 10px;
   box-shadow: 0 8px 32px rgba(0,0,0,.22);
-  width: 540px;
+  width: 600px;
   max-height: 82vh;
   display: flex;
   flex-direction: column;
@@ -102,6 +103,11 @@
 .jm-hbtn:hover { color: #fff; background: rgba(255,255,255,.15); }
 .jm-body { flex: 1; overflow-y: auto; min-height: 40px; }
 .jm.minimized .jm-body { display: none; }
+.jm-subheader { display: flex; align-items: center; gap: 3px; padding: 4px 8px; background: #f3f4f6; border-bottom: 1px solid #e5e7eb; flex-shrink: 0; flex-wrap: wrap; min-height: 30px; }
+.jm.minimized .jm-subheader { display: none; }
+.jm-shbtn { background: #e5e7eb; border: 1px solid #d1d5db; border-radius: 4px; padding: 2px 7px; font-size: 11px; cursor: pointer; color: #374151; font-family: inherit; white-space: nowrap; }
+.jm-shbtn:hover { background: #d1d5db; }
+.jm-shbtn.active { background: #2563eb; color: #fff; border-color: #2563eb; }
 /* Patterns panel */
 .jm-panel { padding: 10px 12px; }
 .jm-list { max-height: 420px; overflow-y: auto; margin-bottom: 4px; }
@@ -198,13 +204,19 @@
 
     modal.appendChild(header);
 
+    _subheader = document.createElement("div");
+    _subheader.className = "jm-subheader";
+    modal.appendChild(_subheader);
+
     _body = document.createElement("div");
     _body.className = "jm-body";
     modal.appendChild(_body);
 
     // Pinned static tabs (appended after any toolbar tabs)
-    _addStaticTab("patterns", "📁 Patterns", _buildPatternsPanel());
-    _addStaticTab("tools",    "🛠 Tools",    _buildToolsPanel());
+    _addStaticTab("skeleton",    "🦴 Skeleton",     _buildSkeletonPanel());
+    _addStaticTab("net-recorder","📡 Net",          _buildNetRecorderPanel());
+    _addStaticTab("patterns",    "📁 Patterns",     _buildPatternsPanel());
+    _addStaticTab("tools",       "🛠 Tools",        _buildToolsPanel());
 
     _setupDrag(header);
 
@@ -612,6 +624,86 @@
     });
   }
 
+  // ─── Subheader rendering ────────────────────────────────────────────────
+
+  function _renderSubheader(defs) {
+    if (!_subheader) return;
+    _subheader.innerHTML = "";
+    if (!defs || defs.length === 0) {
+      _subheader.style.display = "none";
+      return;
+    }
+    _subheader.style.display = "";
+    defs.forEach(function (def) {
+      const btn = document.createElement("button");
+      btn.className = "jm-shbtn" + (def.active ? " active" : "");
+      btn.textContent = def.label;
+      if (def.title) btn.title = def.title;
+      btn.addEventListener("click", function () { if (def.onClick) def.onClick(btn); });
+      _subheader.appendChild(btn);
+    });
+  }
+
+  // ─── Skeleton launch-pad panel ──────────────────────────────────────────
+
+  function _buildSkeletonPanel() {
+    const el = document.createElement("div");
+    el.className = "jm-panel";
+
+    const info = document.createElement("p");
+    info.style.cssText = "font-size:12px;color:#6b7280;margin:0 0 10px;";
+    info.textContent = "DOM skeleton inspector — visualises layout structure as a tree overlay.";
+    el.appendChild(info);
+
+    const modes = [
+      { id: "tree",    label: "Tree view" },
+      { id: "overlay", label: "Overlay boxes" },
+      { id: "panel",   label: "Panel" },
+    ];
+    modes.forEach(function (m) {
+      const btn = document.createElement("button");
+      btn.className = "jm-tool-btn";
+      btn.textContent = m.label;
+      btn.addEventListener("click", function () {
+        if (ns.skeletonOverlay) {
+          if (typeof ns.skeletonOverlay.setMode === "function") {
+            ns.skeletonOverlay.setMode(m.id);
+          } else {
+            ns.skeletonOverlay.renderOverlay(m.id);
+          }
+        }
+      });
+      el.appendChild(btn);
+    });
+    return el;
+  }
+
+  // ─── Net-recorder launch-pad panel ──────────────────────────────────────
+
+  function _buildNetRecorderPanel() {
+    const el = document.createElement("div");
+    el.className = "jm-panel";
+
+    const info = document.createElement("p");
+    info.style.cssText = "font-size:12px;color:#6b7280;margin:0 0 10px;";
+    info.textContent = "Network recorder — capture and replay fetch/XHR/WebSocket calls.";
+    el.appendChild(info);
+
+    const actions = [
+      { label: "Start recording",  fn: function () { ns.netRecorderOverlay && ns.netRecorderOverlay.start && ns.netRecorderOverlay.start(); } },
+      { label: "Stop & export",    fn: function () { ns.netRecorderOverlay && ns.netRecorderOverlay.stop  && ns.netRecorderOverlay.stop();  } },
+      { label: "Export HAR",       fn: function () { ns.netRecorderOverlay && ns.netRecorderOverlay.exportHar && ns.netRecorderOverlay.exportHar(); } },
+    ];
+    actions.forEach(function (a) {
+      const btn = document.createElement("button");
+      btn.className = "jm-tool-btn";
+      btn.textContent = a.label;
+      btn.addEventListener("click", a.fn);
+      el.appendChild(btn);
+    });
+    return el;
+  }
+
   // ─── Public API ─────────────────────────────────────────────────────────
 
   // Compute a good display position near a picked DOM element and store for first open.
@@ -621,8 +713,8 @@
       if (rect.right <= 0 || rect.left >= window.innerWidth) return null;
       const top  = Math.max(20, Math.min(rect.top, window.innerHeight - 300));
       const left = rect.left > window.innerWidth / 2
-        ? Math.max(10, rect.left - 560)
-        : Math.min(rect.right + 16, window.innerWidth - 560);
+        ? Math.max(10, rect.left - 620)
+        : Math.min(rect.right + 16, window.innerWidth - 620);
       return { left: left, top: top };
     } catch (_) { return null; }
   }
@@ -715,8 +807,16 @@
         t.btn.classList.toggle("active", active);
         t.panel.style.display = active ? "" : "none";
         if (active && t.panel._reload) t.panel._reload();
+        if (active) _renderSubheader(t.subheaderDefs || []);
       });
       _activeTabId = tabId;
+    },
+
+    setTabSubheader: function (tabId, defs) {
+      const tab = _tabs.find(function (t) { return t.id === tabId; });
+      if (!tab) return;
+      tab.subheaderDefs = defs;
+      if (_activeTabId === tabId) _renderSubheader(defs);
     },
   };
 

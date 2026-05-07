@@ -360,8 +360,10 @@
     function _updateCount(toolbar) {
       const el = toolbar && toolbar.querySelector(".jaal-count");
       if (!el) return;
-      const visible = safeQSA(container, _itemSel).filter(function (e) { return e.style.display !== "none"; });
-      el.textContent = visible.length + " items";
+      const all = safeQSA(container, _itemSel);
+      const visible = all.filter(function (e) { return e.style.display !== "none"; });
+      const total = totalItems || all.length;
+      el.textContent = visible.length + " of " + total + " items";
     }
 
     // ─── Filters ────────────────────────────────────────────────────
@@ -413,10 +415,9 @@
       row.querySelectorAll(".jaal-sort-btn").forEach(function (btn) {
         btn.addEventListener("click", function () {
           const dir = btn.getAttribute("data-dir");
+          // Pressing the same sort button twice is a noop — list is already sorted this way.
           if (_currentSort.colIndex === colIdx && _currentSort.direction === dir) {
-            ns.sorter && ns.sorter.resetOrder();
-            _currentSort = { colIndex: -1, direction: null };
-            toolbar.querySelectorAll(".jaal-sort-btn").forEach(function (b) { b.classList.remove("active"); });
+            return;
           } else {
             _currentSort = { colIndex: colIdx, direction: dir };
             toolbar.querySelectorAll(".jaal-sort-btn").forEach(function (b) { b.classList.remove("active"); });
@@ -492,9 +493,13 @@
       _ensureHlStyle();
       const items = safeQSA(container, _itemSel);
       items.forEach(function (item) {
-        const target = col.selector
-          ? item.querySelector(col.selector.trimStart().startsWith(">") ? ":scope " + col.selector : col.selector)
-          : item;
+        let target = item;
+        if (col.selector) {
+          try {
+            const sel = col.selector.trimStart().startsWith(">") ? ":scope " + col.selector : col.selector;
+            target = item.querySelector(sel) || null;
+          } catch (_) { target = null; }
+        }
         if (target) {
           if (on) target.classList.add("jaal-field-highlight");
           else     target.classList.remove("jaal-field-highlight");
@@ -618,10 +623,9 @@
         btn.addEventListener("click", function () {
           const colIdx = parseInt(btn.getAttribute("data-col"));
           const dir    = btn.getAttribute("data-dir");
+          // Pressing the same sort button twice is a noop — list is already sorted this way.
           if (_currentSort.colIndex === colIdx && _currentSort.direction === dir) {
-            ns.sorter && ns.sorter.resetOrder();
-            _currentSort = { colIndex: -1, direction: null };
-            toolbar.querySelectorAll(".jaal-sort-btn").forEach(function (b) { b.classList.remove("active"); });
+            return;
           } else {
             _currentSort = { colIndex: colIdx, direction: dir };
             toolbar.querySelectorAll(".jaal-sort-btn").forEach(function (b) { b.classList.remove("active"); });
@@ -1276,21 +1280,6 @@
     });
     _updateShowHiddenBtn(toolbar);
     _updateStatus(toolbar);
-
-    // Apply sortDefault for the first column that declares one
-    if (_currentSort.colIndex < 0) {
-      for (let _sdi = 0; _sdi < _columns.length; _sdi++) {
-        const _sd = _columns[_sdi].sortDefault;
-        if (_sd === "asc" || _sd === "desc") {
-          _currentSort = { colIndex: _sdi, direction: _sd };
-          ns.sorter && ns.sorter.sortElements(container, _itemSel, _columns[_sdi], _sd);
-          const _sdBtn = toolbar.querySelector(".jaal-sort-btn[data-col=\"" + _sdi + "\"][data-dir=\"" + _sd + "\"]");
-          if (_sdBtn) _sdBtn.classList.add("active");
-          log.info && log.info("sort_default_applied", { phase: "init", col: _columns[_sdi].name, dir: _sd });
-          break;
-        }
-      }
-    }
 
     function _refresh() {
       _updateStatus(toolbar);

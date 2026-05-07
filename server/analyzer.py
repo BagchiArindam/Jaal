@@ -70,6 +70,18 @@ Selector rules (these have all been bug sources — follow them carefully):
 - Each column's selector (if non-empty) should match EXACTLY ONE element per real item.
   Use the data-jaal-path attribute hints on nodes to understand what path they came from.
 
+Common product-list fields hint:
+If the page is a product list or storefront, fields commonly visible on each card include:
+product title, price, original/strikethrough price, image, star rating, review count, brand,
+quantity/pack-size, delivery time, badge/offer text, "add to cart" label. Return these when the
+super-item shows them — do not omit them as "generic" or "decorative". If a field appears in
+even one of the sample blocks, include it as a column.
+
+Column selector validation:
+Each column's non-empty selector MUST match EXACTLY ONE element inside each
+<div class="jaal-super-item"> block. If a selector matches zero or multiple elements in the
+sample, omit that column rather than returning a broken selector.
+
 Data-type guidance:
 - Money/prices → "currency", sortDefault "asc"
 - Star ratings or numeric scores → "rating" or "number"
@@ -257,11 +269,27 @@ def _prune_debug(index_path: str, max_entries: int = 500) -> None:
 # Column detection
 # ─────────────────────────────────────────────────────────────────────────────
 
+_MAX_SAMPLES_BYTES = 12_000  # ~12 KB; prevents Amazon-style 45 KB prompt blow-up
+
+
+def _truncate_samples_text(samples_text: str, max_bytes: int = _MAX_SAMPLES_BYTES) -> str:
+    """Truncate the combined samples text to max_bytes, preserving block boundaries."""
+    if len(samples_text) <= max_bytes:
+        return samples_text
+    truncated = samples_text[:max_bytes]
+    # Snap to last complete line so we don't produce a half-tag.
+    last_nl = truncated.rfind("\n")
+    if last_nl > max_bytes // 2:
+        truncated = truncated[:last_nl]
+    return truncated + "\n<!-- [truncated to fit token budget] -->"
+
+
 def _build_column_prompt(metadata: dict, samples: list[str]) -> str:
     cleaned = [clean_html(s) for s in samples]
-    samples_text = "\n\n".join(
+    raw_text = "\n\n".join(
         f"--- Sample {i + 1} ---\n{s}" for i, s in enumerate(cleaned)
     )
+    samples_text = _truncate_samples_text(raw_text)
 
     tag_dist = metadata.get("childTagDistribution", {})
     dominant_tag = max(tag_dist, key=tag_dist.get) if tag_dist else "div"

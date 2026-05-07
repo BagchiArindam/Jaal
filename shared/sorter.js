@@ -140,34 +140,45 @@
   }
 
   // --- Original order preservation ---
+  //
+  // Each slot records { element, parent, anchor } where anchor is the first
+  // non-item sibling after that element in the original DOM (may be null).
+  // Restoring from slots is O(n) and idempotent — applying two successive
+  // sorts always produces identical DOM because we restore first, then sort
+  // from the snapshot, then reinsert into the original slots.
 
   let originalOrder = null;
 
   function saveOriginalOrder(container, itemSelector) {
     if (originalOrder) return;
     const items = safeQSA(container, itemSelector);
+    const itemSet = new Set(items);
     originalOrder = {
-      container,
-      itemSelector,
-      elements: items.map(function (el) {
-        return { element: el, parent: el.parentElement, nextSibling: el.nextSibling };
+      container: container,
+      itemSelector: itemSelector,
+      slots: items.map(function (el) {
+        var anchor = el.nextSibling;
+        while (anchor && itemSet.has(anchor)) anchor = anchor.nextSibling;
+        return { element: el, parent: el.parentElement, anchor: anchor };
       }),
     };
     log.debug("save_original_order", { phase: "mutate", count: items.length });
   }
 
-  function resetOrder() {
+  function _restoreToSlots() {
     if (!originalOrder) return;
-    originalOrder.elements.forEach(function (rec) {
-      const { element, parent, nextSibling } = rec;
-      element.style.display = "";
-      if (parent && parent.isConnected) {
-        const ref = (nextSibling && nextSibling.parentElement === parent) ? nextSibling : null;
-        parent.insertBefore(element, ref);
-      } else {
-        originalOrder.container.appendChild(element);
+    originalOrder.slots.forEach(function (s) {
+      s.element.style.display = "";
+      if (s.parent && s.parent.isConnected) {
+        var ref = (s.anchor && s.anchor.parentElement === s.parent) ? s.anchor : null;
+        s.parent.insertBefore(s.element, ref);
       }
     });
+  }
+
+  function resetOrder() {
+    if (!originalOrder) return;
+    _restoreToSlots();
     log.info("reset_order", { phase: "mutate" });
   }
 
@@ -182,36 +193,29 @@
 
   // --- Sort ---
 
-  // For each original item record the first non-item sibling following it ("anchor").
-  // After detaching all items, reinsert sorted items before their slot's anchor.
-  // Non-item siblings (brand spotlights, ad rows, row-wrapper divs) are never moved.
-  // Works for both 1D containers with mixed siblings and 2D-matrix row-wrapper layouts.
-  function _anchorReinsert(originalItems, sortedItems) {
-    const itemSet = new Set(originalItems);
-    const slots = originalItems.map(function (it) {
-      let anchor = it.nextSibling;
-      while (anchor && itemSet.has(anchor)) anchor = anchor.nextSibling;
-      return { parent: it.parentElement, anchor: anchor };
-    });
-    originalItems.forEach(function (el) { el.remove(); });
-    for (var i = 0; i < slots.length; i++) {
-      var s = slots[i];
-      if (s.parent && s.parent.isConnected) {
-        s.parent.insertBefore(sortedItems[i], s.anchor || null);
-      }
-    }
-  }
-
   function sortElements(container, itemSelector, columnDef, direction) {
     saveOriginalOrder(container, itemSelector);
-    const items = safeQSA(container, itemSelector);
+    // Always restore to original positions first so repeated sorts are idempotent.
+    _restoreToSlots();
+    // Sort from the snapshot (original order), not from current DOM state.
+    const items = originalOrder ? originalOrder.slots.map(function (s) { return s.element; })
+                                : safeQSA(container, itemSelector);
     const pairs = items.map(function (item) {
       const raw   = extractValue(item, columnDef.selector, columnDef.attribute);
       const value = parseByType(raw, columnDef.dataType);
       return { element: item, value: value };
     });
     pairs.sort(function (a, b) { return compare(a.value, b.value, direction); });
-    _anchorReinsert(items, pairs.map(function (p) { return p.element; }));
+    // Reinsert sorted items into the original slots.
+    const sortedEls = pairs.map(function (p) { return p.element; });
+    if (originalOrder) {
+      originalOrder.slots.forEach(function (s, i) {
+        if (s.parent && s.parent.isConnected) {
+          var ref = (s.anchor && s.anchor.parentElement === s.parent) ? s.anchor : null;
+          s.parent.insertBefore(sortedEls[i], ref);
+        }
+      });
+    }
     log.info("sort_applied", { phase: "mutate", col: columnDef.name, direction: direction, count: pairs.length });
   }
 

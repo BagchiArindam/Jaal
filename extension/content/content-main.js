@@ -269,19 +269,21 @@
       if (Jaal.toolbar) {
         const key = "manual-" + (++_manualCounter);
         const toolbarOpts = { containerSelector: containerSelector, label: "Jaal · pick", configId: key, runId: runId };
+        const canonicalCount = (parentAnalysis && parentAnalysis.items && parentAnalysis.items.length)
+          ? parentAnalysis.items.length : validation.itemCount;
         const inst = (loadingInst && loadingInst.upgrade)
           ? loadingInst.upgrade(
               { columns: validation.columns, itemSelector: analysis.itemSelector },
               containerEl,
               analysis.itemSelector,
-              validation.itemCount,
+              canonicalCount,
               toolbarOpts
             )
           : Jaal.toolbar.create(
               { columns: validation.columns, itemSelector: analysis.itemSelector },
               containerEl,
               analysis.itemSelector,
-              validation.itemCount,
+              canonicalCount,
               toolbarOpts
         );
         Jaal._activeToolbars.set(key, inst);

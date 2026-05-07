@@ -46,7 +46,7 @@
 <style>
   :host { all: initial; }
   #panel {
-    position: fixed; top: 10px; right: 10px; z-index: 2147483647;
+    position: fixed; top: 10px; right: 10px; z-index: 2147483646;
     background: #1a1a2e; color: #e0e0e0;
     font: 13px/1.4 "SFMono-Regular", Consolas, monospace;
     border-radius: 8px; box-shadow: 0 4px 24px rgba(0,0,0,0.6);
