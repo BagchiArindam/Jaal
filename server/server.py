@@ -66,11 +66,12 @@ def analyze_endpoint():
 
     url = data.get("url", "")
     structural_hash = data.get("structuralHash", "")
+    raw_items = data.get("rawItems", [])
 
     if url and structural_hash:
         cached = cache.get(url, structural_hash)
         if cached is not None:
-            run_id = write_cache_hit_debug(metadata, samples, cached)
+            run_id = write_cache_hit_debug(metadata, samples, cached, raw_items=raw_items)
             log.info("route_analyze_cache_hit", phase="mutate", url=url, hash=structural_hash, runId=run_id)
             return jsonify({**cached, "cached": True, "runId": run_id})
 
@@ -80,10 +81,11 @@ def analyze_endpoint():
         url=url,
         structuralHash=structural_hash,
         sampleCount=len(samples),
+        rawItemCount=len(raw_items),
     )
 
     try:
-        result = analyze(metadata, samples)
+        result = analyze(metadata, samples, raw_items=raw_items)
     except Exception as e:
         log.error("route_analyze_failed", phase="error", url=url, err=str(e))
         return jsonify({"error": str(e)}), 500

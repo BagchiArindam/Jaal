@@ -70,9 +70,12 @@ Selector rules (these have all been bug sources — follow them carefully):
 - Each column's selector (if non-empty) should match EXACTLY ONE element per real item.
   Use the data-jaal-path attribute hints on nodes to understand what path they came from.
 
+Do NOT return columns for image fields (img elements with src attributes). Images cannot
+be sorted or filtered and should be excluded from the columns array entirely.
+
 Common product-list fields hint:
 If the page is a product list or storefront, fields commonly visible on each card include:
-product title, price, original/strikethrough price, image, star rating, review count, brand,
+product title, price, original/strikethrough price, star rating, review count, brand,
 quantity/pack-size, delivery time, badge/offer text, "add to cart" label. Return these when the
 super-item shows them — do not omit them as "generic" or "decorative". If a field appears in
 even one of the sample blocks, include it as a column.
@@ -81,6 +84,15 @@ Column selector validation:
 Each column's non-empty selector MUST match EXACTLY ONE element inside each
 <div class="jaal-super-item"> block. If a selector matches zero or multiple elements in the
 sample, omit that column rather than returning a broken selector.
+
+Synthetic sample rationalization:
+The synthetic samples are built by merging leaf nodes across many cards. Sometimes a field's
+sample value is wrong because different cards place different content at the same DOM position
+(e.g. a product-name element showing "450 g" in one sample, or a price element showing a
+product name). When a sample value looks semantically wrong for its field's class name or
+data-jaal-path, treat it as a merge artifact — use the class name and path to identify the
+true field type, cross-reference with the real items below, and write the selector accordingly.
+Do not omit a field solely because one sample value looks anomalous.
 
 Data-type guidance:
 - Money/prices → "currency", sortDefault "asc"
@@ -154,6 +166,7 @@ def _write_debug_pre(
     user_prompt: str,
     metadata: dict,
     samples: list,
+    raw_items: list = None,
 ) -> None:
     """Write input-side artifacts BEFORE calling the AI provider.
     Called on every /analyze request so artifacts exist even if the provider throws."""
@@ -163,6 +176,10 @@ def _write_debug_pre(
         if samples:
             with open(os.path.join(run_dir, "super-element.html"), "w", encoding="utf-8") as f:
                 f.write(samples[0])
+        if raw_items:
+            with open(os.path.join(run_dir, "original-items.html"), "w", encoding="utf-8") as f:
+                for i, html in enumerate(raw_items):
+                    f.write(f"<!-- Real item {i + 1} -->\n{html}\n\n")
         with open(os.path.join(run_dir, "metadata.json"), "w", encoding="utf-8") as f:
             json.dump(metadata, f, indent=2, default=str)
         url = metadata.get("url", "")
@@ -271,11 +288,12 @@ def _write_debug_error(run_id: str, metadata: dict, exc_traceback: str) -> None:
     _write_debug_post(run_id, metadata, {}, status="error")
 
 
-def write_cache_hit_debug(metadata: dict, samples: list, cached_result: dict) -> str:
+def write_cache_hit_debug(metadata: dict, samples: list, cached_result: dict, raw_items: list = None) -> str:
     """Write debug artifacts for a cache-hit /analyze response. Returns the new runId."""
     run_id = _generate_run_id()
-    user_message = _build_column_prompt(metadata, samples) if samples else "(no samples — cache hit)"
-    _write_debug_pre(run_id, COLUMN_SYSTEM_PROMPT, user_message, metadata, samples)
+    raw_items = raw_items or []
+    user_message = _build_column_prompt(metadata, samples, raw_items=raw_items) if samples else "(no samples — cache hit)"
+    _write_debug_pre(run_id, COLUMN_SYSTEM_PROMPT, user_message, metadata, samples, raw_items=raw_items)
     try:
         run_dir = os.path.join(_DEBUG_DIR, run_id)
         with open(os.path.join(run_dir, "cache-hit.txt"), "w", encoding="utf-8") as f:
@@ -331,7 +349,7 @@ def _truncate_samples_text(samples_text: str, max_bytes: int = _MAX_SAMPLES_BYTE
     return truncated + "\n<!-- [truncated to fit token budget] -->"
 
 
-def _build_column_prompt(metadata: dict, samples: list[str]) -> str:
+def _build_column_prompt(metadata: dict, samples: list[str], raw_items: list[str] = None) -> str:
     cleaned = [clean_html(s) for s in samples]
     raw_text = "\n\n".join(
         f"--- Sample {i + 1} ---\n{s}" for i, s in enumerate(cleaned)
@@ -351,7 +369,7 @@ def _build_column_prompt(metadata: dict, samples: list[str]) -> str:
             f"Your itemSelector MUST use a descendant selector (no '>') to reach them."
         )
 
-    return COLUMN_USER_TEMPLATE.format(
+    prompt = COLUMN_USER_TEMPLATE.format(
         container_tag=metadata.get("containerTag", "div"),
         container_classes=metadata.get("containerClasses", ""),
         total_children=metadata.get("totalChildren", "unknown"),
@@ -361,11 +379,34 @@ def _build_column_prompt(metadata: dict, samples: list[str]) -> str:
         samples_text=samples_text,
     )
 
+    if raw_items:
+        cleaned_real = [clean_html(r) for r in raw_items[:2]]
+        real_section = (
+            "\n\nReal DOM items — verbatim elements from the live page. "
+            "Use their class names and structure as the authoritative reference for writing selectors "
+            "and for cross-checking synthetic sample values. "
+            "Note: individual real items may be missing optional sub-fields (e.g. an offer badge or "
+            "out-of-stock label) — absence of a sub-field in one real item does not mean the field "
+            "doesn't exist; the synthetic samples capture the full union. "
+            "However, if a field's class name in the synthetic sample shows a value that clearly "
+            "belongs to a different field type (e.g. a product-name element showing '450 g' or a "
+            "price — indicating a merge artifact), use these real items to confirm the correct field "
+            "type and write the selector accordingly:\n\n"
+            + "\n\n".join(f"--- Real Item {i + 1} ---\n{h}" for i, h in enumerate(cleaned_real))
+        )
+        _suffix = "\n\nReturn the JSON object only."
+        if prompt.endswith(_suffix):
+            prompt = prompt[: -len(_suffix)]
+        prompt += real_section + _suffix
 
-def analyze(metadata: dict, samples: list[str]) -> dict:
+    return prompt
+
+
+def analyze(metadata: dict, samples: list[str], raw_items: list[str] = None) -> dict:
     import traceback as _tb
     run_id = _generate_run_id()
-    user_message = _build_column_prompt(metadata, samples)
+    raw_items = raw_items or []
+    user_message = _build_column_prompt(metadata, samples, raw_items=raw_items)
     provider = get_provider()
     log.info(
         "analyze_start",
@@ -375,9 +416,10 @@ def analyze(metadata: dict, samples: list[str]) -> dict:
         model=provider.model,
         promptChars=len(user_message),
         sampleCount=len(samples),
+        rawItemCount=len(raw_items),
     )
     # Write input artifacts before provider so they exist even if provider throws.
-    _write_debug_pre(run_id, COLUMN_SYSTEM_PROMPT, user_message, metadata, samples)
+    _write_debug_pre(run_id, COLUMN_SYSTEM_PROMPT, user_message, metadata, samples, raw_items=raw_items)
     try:
         result = provider.run_json_task(COLUMN_SYSTEM_PROMPT, user_message)
     except Exception as exc:

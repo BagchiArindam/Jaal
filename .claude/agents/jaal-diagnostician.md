@@ -25,6 +25,7 @@ You are the Jaal diagnostician. The user invokes you when sort/filter has misbeh
    - Does it contain ALL fields the user expects to sort on (price, rating, title, date, etc.)?
    - If a field is MISSING → upstream bug: `buildSyntheticSuperItem` in `shared/html-extractor.js` either stopped traversal early (`_gatherLeaves` depth limit), or `_signature` collapsed two different fields into one, or the real items genuinely lack that field for all samples.
    - Look for `data-jaal-path` attributes on each node — these are the deterministic fallback selectors. If they're absent, the version of `html-extractor.js` is pre-Tier-12.
+   - If `original-items.html` is present in the same directory, cross-reference: for each `data-jaal-path` in the super-element, check whether that CSS path resolves to an element in the real items. If a super-item field's path doesn't appear in either real item, or the element it would match contains a semantically wrong value (e.g. a product-name class contains "450 g" in the super-element but actual product names in the real items), flag it as a `super-item-merge-error` — `buildSyntheticSuperItem` merged two different card structures into the same positional leaf.
 
 3. **Read `server/.debug/<runId>/metadata.json`.**
    - Is `layout` correctly `"1D"` or `"2D-matrix"`? A 2D-matrix misidentified as 1D will produce wrong `itemSelector`.

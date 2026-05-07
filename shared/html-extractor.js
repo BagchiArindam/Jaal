@@ -353,6 +353,25 @@
       items = _filterAberrantSiblings(items);
     }
 
+    // Guard: if the dominant-class items have very few leaves (< 4 avg), they may be
+    // UI filter chips or header elements, not product cards. If the discarded minority
+    // items are significantly richer (3×+), prefer them instead.
+    (function() {
+      var avgLeavesChosen = items.reduce(function(s, it) { return s + _gatherLeaves(it).length; }, 0) / (items.length || 1);
+      if (avgLeavesChosen < 4 && directChildren.length > items.length) {
+        var discarded = directChildren.filter(function(c) { return items.indexOf(c) < 0; });
+        if (!discarded.length) return;
+        var avgLeavesDiscarded = discarded.reduce(function(s, it) { return s + _gatherLeaves(it).length; }, 0) / (discarded.length || 1);
+        if (avgLeavesDiscarded > avgLeavesChosen * 3) {
+          console.log("[Jaal.htmlExtractor] analyzeParent — dominant class looks like non-card chips (avgLeaves="
+            + avgLeavesChosen.toFixed(1) + "); discarded minority richer (avgLeaves="
+            + avgLeavesDiscarded.toFixed(1) + "), retrying filter on discarded set");
+          var altItems = _filterAberrantSiblings(discarded);
+          if (altItems.length >= 3) items = altItems;
+        }
+      }
+    })();
+
     const itemSelector = _itemSelectorFor(items);
 
     console.log("[Jaal.htmlExtractor] analyzeParent — done layout=" + layout
@@ -561,10 +580,10 @@
       return { html: "<div class=\"jaal-super-item\"></div>", htmlBlocks: [], fieldCount: 0, itemCount: items.length, leaves: [] };
     }
 
-    // Emit up to 3 synthetic blocks, each using a different sample value per field.
+    // Emit up to 2 synthetic blocks, each using a different sample value per field.
     // The AI sees realistic value variation across blocks, enabling better semantic inference.
     // entriesArr is already sorted by frequency and capped at 25 fields.
-    var numBlocks = Math.min(3, Math.max(1, items.length));
+    var numBlocks = Math.min(2, Math.max(1, items.length));
     var htmlBlocks = [];
     for (var blockIdx = 0; blockIdx < numBlocks; blockIdx++) {
       var blockParts = entriesArr.map(function (e) {

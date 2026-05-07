@@ -166,10 +166,30 @@
       superItem = Jaal.htmlExtractor.buildSyntheticSuperItem(parentAnalysis.items);
 
       if (superItem.fieldCount > 0) {
-        // Send up to 3 synthetic blocks so AI sees value variation across items
+        // Send up to 2 synthetic blocks so AI sees value variation across items
         samples = superItem.htmlBlocks && superItem.htmlBlocks.length > 0
           ? superItem.htmlBlocks
           : [superItem.html];
+
+        // Capture 2 random real items from the live DOM to send alongside the
+        // synthetic super-item. The AI uses these as the authoritative structure
+        // reference for writing selectors and validating synthetic field values.
+        var _rawItems = [];
+        (function() {
+          var pool = parentAnalysis.items.slice();
+          for (var i = pool.length - 1; i > 0; i--) {
+            var j = Math.floor(Math.random() * (i + 1));
+            var tmp = pool[i]; pool[i] = pool[j]; pool[j] = tmp;
+          }
+          pool.slice(0, 2).forEach(function(el) {
+            try {
+              var clone = el.cloneNode(true);
+              Array.from(clone.querySelectorAll('[data-jaal-path]')).forEach(function(n) { n.removeAttribute('data-jaal-path'); });
+              _rawItems.push(clone.outerHTML.substring(0, 5000));
+            } catch (_e) {}
+          });
+        })();
+
         const directChildren = Array.from(containerEl.children);
         const tagCounts = {};
         directChildren.forEach(function (c) {
@@ -195,6 +215,7 @@
           items: parentAnalysis.items.length,
           fields: superItem.fieldCount,
           blocks: samples.length,
+          rawItems: _rawItems.length,
           layout: parentAnalysis.layout,
         });
       } else {
@@ -217,7 +238,7 @@
     try {
       const response = await sendToBackground({
         type: "jaal-analyze",
-        payload: { metadata: metadata, samples: samples, url: window.location.href },
+        payload: { metadata: metadata, samples: samples, rawItems: _rawItems, url: window.location.href },
       });
 
       if (!response || !response.ok) {
