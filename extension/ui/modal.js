@@ -635,6 +635,14 @@
     }
     _subheader.style.display = "";
     defs.forEach(function (def) {
+      if (def.kind === "label") {
+        const span = document.createElement("span");
+        span.className = "jm-shbtn";
+        span.style.cssText = "cursor:default;background:#e5e7eb;font-weight:600;";
+        span.textContent = def.text || "";
+        _subheader.appendChild(span);
+        return;
+      }
       const btn = document.createElement("button");
       btn.className = "jm-shbtn" + (def.active ? " active" : "");
       btn.textContent = def.label;
@@ -777,7 +785,8 @@
       if (firstStaticPanel) _body.insertBefore(panel, firstStaticPanel);
       else _body.appendChild(panel);
 
-      _tabs.unshift({ id: configId, btn: btn, panel: panel, inst: inst });
+      const subheaderDefs = (inst.getSubheaderDefs) ? inst.getSubheaderDefs() : [];
+      _tabs.unshift({ id: configId, btn: btn, panel: panel, inst: inst, subheaderDefs: subheaderDefs });
       ns.modal.activateTab(configId);
       log.info && log.info("toolbar_tab_added", { phase: "mutate", id: configId });
     },

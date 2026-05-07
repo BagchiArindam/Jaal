@@ -178,11 +178,53 @@ def _write_debug_pre(
         log.warning("debug_pre_failed", phase="error", runId=run_id, err=str(exc))
 
 
+def _eval_selectors(result: dict, samples: list[str]) -> list[dict]:
+    """For each AI column selector, check how many super-item blocks it matches.
+    Returns a list of { name, selector, matchCounts, distinctValues, distinctTypes }
+    per column so the diagnostician can flag mismatches without reading HTML manually."""
+    try:
+        from bs4 import BeautifulSoup
+        columns = result.get("columns", [])
+        if not columns or not samples:
+            return []
+        eval_rows = []
+        for col in columns:
+            sel = col.get("selector", "")
+            if not sel:
+                eval_rows.append({"name": col.get("name",""), "selector": sel, "matchCounts": [], "note": "empty_selector"})
+                continue
+            match_counts = []
+            all_values = []
+            for sample_html in samples:
+                try:
+                    soup = BeautifulSoup(sample_html, "html.parser")
+                    matches = soup.select(sel)
+                    match_counts.append(len(matches))
+                    for m in matches[:2]:
+                        v = m.get_text(" ", strip=True)[:80]
+                        if v:
+                            all_values.append(v)
+                except Exception:
+                    match_counts.append(-1)
+            distinct_values = list(dict.fromkeys(all_values))[:5]
+            eval_rows.append({
+                "name": col.get("name",""),
+                "selector": sel,
+                "matchCounts": match_counts,
+                "distinctValues": distinct_values,
+                "stable": all(c == 1 for c in match_counts if c >= 0),
+            })
+        return eval_rows
+    except Exception:
+        return []
+
+
 def _write_debug_post(
     run_id: str,
     metadata: dict,
     result: dict,
     status: str = "ok",
+    samples: list | None = None,
 ) -> None:
     """Write output-side artifacts + index.jsonl after provider returns (or on error)."""
     try:
@@ -190,6 +232,11 @@ def _write_debug_post(
         os.makedirs(run_dir, exist_ok=True)
         with open(os.path.join(run_dir, "parsed.json"), "w", encoding="utf-8") as f:
             json.dump(result, f, indent=2, default=str)
+        if samples and result.get("columns"):
+            sel_eval = _eval_selectors(result, samples)
+            if sel_eval:
+                with open(os.path.join(run_dir, "selector-eval.json"), "w", encoding="utf-8") as f:
+                    json.dump(sel_eval, f, indent=2, default=str)
         url = metadata.get("url", "")
         parts = url.split("/")
         domain = parts[2] if len(parts) > 2 else ""
@@ -344,7 +391,7 @@ def analyze(metadata: dict, samples: list[str]) -> dict:
         columnCount=len(result.get("columns", [])),
         itemSelector=result.get("itemSelector"),
     )
-    _write_debug_post(run_id, metadata, result, status="ok")
+    _write_debug_post(run_id, metadata, result, status="ok", samples=samples)
     result["runId"] = run_id
     return result
 

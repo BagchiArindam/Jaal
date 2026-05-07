@@ -240,12 +240,43 @@
         delete analysis.itemSelector;
       }
 
-      // Prefer the deterministic itemSelector from analyzeParent — the server
-      // only saw the synthetic super-item and can't infer the real DOM's
-      // repeating-unit selector.
-      if (parentAnalysis && parentAnalysis.itemSelector) {
-        analysis.itemSelector = parentAnalysis.itemSelector;
-      }
+      // Choose between the AI's itemSelector and analyzeParent's deterministic one.
+      // The AI sees data-jaal-path hints and often returns a tighter class-specific
+      // selector. Prefer it when it resolves to a reasonable item count (≥5 and no
+      // more than 1.5× the parent count). Fall back to the parent's selector when
+      // the AI's is too broad, empty, or invalid.
+      (function _pickItemSelector() {
+        const aiSel = analysis.itemSelector;
+        const parentSel = parentAnalysis ? parentAnalysis.itemSelector : null;
+        const parentCount = parentAnalysis ? parentAnalysis.items.length : 0;
+
+        if (!aiSel || !containerEl) {
+          if (parentSel) analysis.itemSelector = parentSel;
+          return;
+        }
+
+        let aiCount = 0;
+        try {
+          const safeSel = aiSel.trimStart().startsWith(">") ? ":scope " + aiSel : aiSel;
+          aiCount = containerEl.querySelectorAll(safeSel).length;
+        } catch (_) {
+          if (parentSel) analysis.itemSelector = parentSel;
+          log.info("item_selector_decision", { phase: "mutate", chose: "parent", reason: "ai-sel-invalid", aiSel: aiSel });
+          return;
+        }
+
+        const parentTooMany = parentCount > aiCount * 1.4;
+        const aiReasonable  = aiCount >= 5 && aiCount <= Math.max(parentCount * 1.5, aiCount);
+
+        if (aiReasonable && parentTooMany) {
+          // AI found a tighter, more specific set — use it
+          analysis.itemSelector = aiSel;
+          log.info("item_selector_decision", { phase: "mutate", chose: "ai", aiSel: aiSel, aiCount: aiCount, parentSel: parentSel, parentCount: parentCount });
+        } else {
+          if (parentSel) analysis.itemSelector = parentSel;
+          log.info("item_selector_decision", { phase: "mutate", chose: "parent", aiSel: aiSel, aiCount: aiCount, parentSel: parentSel, parentCount: parentCount });
+        }
+      })();
 
       // Validate each AI-returned column selector against real items.
       // If a selector matches 0 or >1 elements per card, substitute the
@@ -269,8 +300,17 @@
       if (Jaal.toolbar) {
         const key = "manual-" + (++_manualCounter);
         const toolbarOpts = { containerSelector: containerSelector, label: "Jaal · pick", configId: key, runId: runId };
-        const canonicalCount = (parentAnalysis && parentAnalysis.items && parentAnalysis.items.length)
-          ? parentAnalysis.items.length : validation.itemCount;
+        // Use the actual DOM count for the chosen itemSelector rather than the
+        // raw parentAnalysis count — important when AI's selector was preferred.
+        let canonicalCount = validation.itemCount;
+        try {
+          const safeSel = analysis.itemSelector.trimStart().startsWith(">")
+            ? ":scope " + analysis.itemSelector : analysis.itemSelector;
+          const domCount = containerEl.querySelectorAll(safeSel).length;
+          if (domCount >= 1) canonicalCount = domCount;
+        } catch (_) {
+          if (parentAnalysis && parentAnalysis.items) canonicalCount = parentAnalysis.items.length;
+        }
         const inst = (loadingInst && loadingInst.upgrade)
           ? loadingInst.upgrade(
               { columns: validation.columns, itemSelector: analysis.itemSelector },

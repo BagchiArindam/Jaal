@@ -151,8 +151,10 @@
       if (fpCount[fp] > dominantCount) { dominantFp = fp; dominantCount = fpCount[fp]; }
     });
 
-    // If ≥50% of items share the dominant fingerprint, keep only those.
-    if (dominantCount >= Math.ceil(items.length * 0.5)) {
+    // If ≥30% of items share the dominant fingerprint, keep only those.
+    // 30% is sufficient on noisy pages (Blinkit, Amazon) where utility classes vary
+    // but the product-card fingerprint still forms a clear majority.
+    if (dominantCount >= Math.ceil(items.length * 0.3)) {
       var byClass = items.filter(function (_, i) { return fingerprints[i] === dominantFp; });
       if (byClass.length < items.length) {
         console.log("[Jaal.htmlExtractor] _filterAberrantSiblings — rejected " +
@@ -166,8 +168,8 @@
     var sorted = leafCounts.slice().sort(function (a, b) { return a - b; });
     var median = sorted[Math.floor(sorted.length / 2)];
     if (median === 0) return items;
-    var lo = Math.max(1, Math.floor(median * 0.3));
-    var hi = Math.ceil(median * 2.5);
+    var lo = Math.max(1, Math.floor(median * 0.5));
+    var hi = Math.ceil(median * 1.8);
     var byLeaf = items.filter(function (_, i) { return leafCounts[i] >= lo && leafCounts[i] <= hi; });
     if (byLeaf.length === 0) return items;
     if (byLeaf.length < items.length) {
@@ -510,9 +512,33 @@
 
     // Build the fields (leaves) array from unique signatures.
     // Sort by occurrence frequency (most common fields first) and cap at 25 to prevent prompt bloat.
-    const entriesArr = Array.from(bySig.values());
-    entriesArr.sort(function(a, b) { return b.count - a.count; });
-    if (entriesArr.length > 25) entriesArr.splice(25);
+    var allEntries = Array.from(bySig.values());
+    allEntries.sort(function(a, b) { return b.count - a.count; });
+    if (allEntries.length > 25) allEntries.splice(25);
+
+    // Drop entries whose sample values have inconsistent data types across samples.
+    // A field that yields "Butter Chicken" in one card, "450 g" in another, and
+    // "₹52" in a third is positionally unstable — the selector will produce
+    // unpredictable values at sort/extract time.
+    var entriesArr = allEntries.filter(function(e) {
+      if (e.values.length < 2) return true; // single sample, can't detect mismatch
+      var types = e.values.map(function(v) { return _detectDataType(v, e.attribute); });
+      // If any strong-signal type (currency, number, date, rating) coexists with
+      // a different type (including plain text), the field is unstable — drop it.
+      var strongTypes = types.filter(function(t) { return t !== "text" && t !== "image" && t !== "url"; });
+      if (strongTypes.length === 0) return true; // all text / image / url → stable
+      var allSameStrong = strongTypes.every(function(t) { return t === strongTypes[0]; });
+      if (!allSameStrong) {
+        console.warn("[Jaal.htmlExtractor] buildSyntheticSuperItem — dropping type-mixed field:", { tag: e.tag, classes: e.classes, values: e.values, types: types });
+        return false;
+      }
+      // Strong types are uniform but some samples are plain text — field is ambiguous
+      if (strongTypes.length < types.length) {
+        console.warn("[Jaal.htmlExtractor] buildSyntheticSuperItem — dropping currency/text-mixed field:", { tag: e.tag, values: e.values });
+        return false;
+      }
+      return true;
+    });
     const fields = entriesArr.map(function (e) {
       var sel = e.tag;
       if (e.classes.length) {

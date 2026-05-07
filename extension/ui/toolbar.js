@@ -255,6 +255,10 @@
   function create(analysis, container, itemSelector, totalItems, options) {
     options = options || {};
 
+    // When running inside the modal the toolbar's own header is hidden so the
+    // modal's tab bar + subheader row serve as the single control surface.
+    const _inModal = !!ns.modal;
+
     // ─── Per-instance state (closure) ───────────────────────────────
     let _hostEl          = null;
     let _shadowRoot      = null;
@@ -287,6 +291,8 @@
       configId: _configId,
       label: _label,
       get hostEl() { return _hostEl; },
+      getSubheaderDefs: _getSubheaderDefs,
+      refreshSubheader: _refreshSubheader,
     };
     _instances.push(instance);
     const _instanceIndex = _instances.length - 1;
@@ -364,6 +370,45 @@
       const visible = all.filter(function (e) { return e.style.display !== "none"; });
       const total = totalItems || all.length;
       el.textContent = visible.length + " of " + total + " items";
+      _refreshSubheader();
+    }
+
+    // Build the subheader button defs for the modal's row-2 surface.
+    // Delegates all actions to the real (hidden-in-modal) header buttons so
+    // event wiring only lives in one place.
+    function _getSubheaderDefs() {
+      const tb = _shadowRoot && _shadowRoot.querySelector(".jaal-toolbar");
+      if (!tb) return [];
+      const countEl = tb.querySelector(".jaal-count");
+      const countText = countEl ? countEl.textContent : (totalItems + " items");
+      var defs = [{ kind: "label", text: countText }];
+      var btnMap = [
+        { sel: ".jaal-collapse",       label: "▼/▲",      title: "Collapse/expand" },
+        { sel: ".jaal-detect",         label: "Detect",    title: "Detect pagination" },
+        { sel: ".jaal-flatten",        label: "Flatten",   title: "Flatten all pages" },
+        { sel: ".jaal-scrape",         label: "Scrape",    title: "Scrape to CSV" },
+        { sel: ".jaal-show-hidden",    label: null,        title: "Show hidden columns" },
+        { sel: ".jaal-finalize",       label: null,        title: "Save / unsave config" },
+        { sel: ".jaal-reset",          label: "Reset",     title: "Reset sort and filters" },
+        { sel: ".jaal-add-field",      label: "+ Field",   title: "Add field by clicking element" },
+        { sel: ".jaal-debug",          label: "Debug",     title: "Debug column extraction" },
+        { sel: ".jaal-settings-toggle",label: "⚙",         title: "Settings" },
+        { sel: ".jaal-repick",         label: "↺",         title: "Re-pick element" },
+        { sel: ".jaal-close",          label: "✕",         title: "Close toolbar" },
+      ];
+      btnMap.forEach(function (m) {
+        var realBtn = tb.querySelector(m.sel);
+        if (!realBtn || realBtn.style.display === "none") return;
+        var label = m.label !== null ? m.label : realBtn.textContent.trim();
+        defs.push({ label: label, title: m.title, onClick: function () { realBtn.click(); } });
+      });
+      return defs;
+    }
+
+    function _refreshSubheader() {
+      if (_inModal && ns.modal && ns.modal.setTabSubheader && _configId) {
+        ns.modal.setTabSubheader(_configId, _getSubheaderDefs());
+      }
     }
 
     // ─── Filters ────────────────────────────────────────────────────
@@ -492,6 +537,7 @@
     function _highlightField(col, on) {
       _ensureHlStyle();
       const items = safeQSA(container, _itemSel);
+      let matched = 0;
       items.forEach(function (item) {
         let target = item;
         if (col.selector) {
@@ -499,12 +545,28 @@
             const sel = col.selector.trimStart().startsWith(">") ? ":scope " + col.selector : col.selector;
             target = item.querySelector(sel) || null;
           } catch (_) { target = null; }
+          // If per-item query failed, try querying from the item's parent (row-wrapper in 2D grids)
+          if (!target && item.parentElement && item.parentElement !== container) {
+            try {
+              const sel2 = col.selector.trimStart().startsWith(">") ? ":scope " + col.selector : col.selector;
+              var parentMatch = item.parentElement.querySelector(sel2);
+              // Only use parent match if it's contained within this item's row
+              if (parentMatch && item.contains(parentMatch)) target = parentMatch;
+            } catch (_) {}
+          }
         }
         if (target) {
+          matched++;
           if (on) target.classList.add("jaal-field-highlight");
           else     target.classList.remove("jaal-field-highlight");
         }
       });
+      if (on && items.length > 0) {
+        console.log("[Jaal.toolbar] highlight_field col=" + col.name + " matched=" + matched + "/" + items.length + " selector=" + col.selector);
+        if (matched < items.length * 0.5) {
+          console.warn("[Jaal.toolbar] highlight_field — < 50% items highlighted; selector may be wrong for this layout:", col.selector);
+        }
+      }
     }
 
     function _setupColHighlight(toolbar) {
@@ -1193,8 +1255,12 @@
 
     function _buildToolbarHTML() {
       const colsHTML = _columns.map(function (col, i) { return _buildColumnRow(col, i); }).join("");
+      // When hosted inside the modal, hide the toolbar's own header — the modal
+      // tab bar + subheader row replace it. All buttons are still rendered (and
+      // wired) so getSubheaderDefs() can delegate to them via .click().
+      const headerVis = _inModal ? " style=\"display:none\"" : "";
       return (
-        "<div class=\"jaal-header draggable\">" +
+        "<div class=\"jaal-header draggable\"" + headerVis + ">" +
         "<span class=\"jaal-title\">" + escHtml(_label) + "</span>" +
         "<span class=\"jaal-count\">" + totalItems + " items</span>" +
         "<button class=\"jaal-hbtn jaal-collapse\" title=\"Collapse\">▼</button>" +

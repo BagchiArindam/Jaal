@@ -36,14 +36,21 @@ You are the Jaal diagnostician. The user invokes you when sort/filter has misbeh
    - Is the `data-jaal-path` hint instruction present?
    - If the prompt is missing these, the server version is pre-Tier-12.
 
-5. **Read `server/.debug/<runId>/parsed.json`.**
+5. **Read `server/.debug/<runId>/selector-eval.json`** (if present — written after every AI call).
+   - For each column entry, check `matchCounts` (one integer per super-item block): a healthy selector matches exactly 1 element per block (`[1, 1, 1]`). Any `0` means the selector matches nothing; any `>1` means it's over-broad.
+   - Check `stable: false` — these are the columns most likely to produce wrong extraction at sort time.
+   - Check `distinctValues` for type inconsistency: if values look like ["Butter Chicken", "450 g", "₹52"], the field position is unstable across cards (see `wrong-itemSelector`/`bad-column-selector`).
+   - If `selector-eval.json` is absent, the server version predates this artifact and you must infer from super-element.html instead.
+
+6. **Read `server/.debug/<runId>/parsed.json`.**
    - For each column in `columns[]`, examine `selector`:
      - Does it look like it belongs INSIDE one card (e.g. `.price`, `:scope > span.amount`) or does it look like a full-document selector (e.g. `#product-listing .price`)?
      - Would `:scope` work inside a real card element, or did the AI use a document-absolute path?
      - Is the selector reachable from the super-item nodes (cross-reference with super-element.html)?
-   - For each invalid selector, check if `parsed.json` includes a `fallbackSelector` field — if so, `content-main.js` should have substituted it; if not, Tier-12 fallback isn't applied.
+   - For each invalid selector, check if `parsed.json` includes a `fallbackSelector` field — if so, `content-main.js` should have substituted it; if not, the fallback isn't applied.
+   - Flag any column with `stable: false` in `selector-eval.json` and quote its `distinctValues`.
 
-6. **Read `server/.debug/<runId>/response.json`** (raw AI output) if `parsed.json` doesn't explain the failure — the parser may have mangled the response.
+7. **Read `server/.debug/<runId>/response.json`** (raw AI output) if `parsed.json` doesn't explain the failure — the parser may have mangled the response.
 
 ## Diagnosis categories
 
@@ -53,6 +60,7 @@ You are the Jaal diagnostician. The user invokes you when sort/filter has misbeh
 | `wrong-layout-detection` | `metadata.json` shows wrong `layout` | Check `unwrapToRepeatingItems` in `shared/html-extractor.js` |
 | `wrong-itemSelector` | `itemSelector` is too broad/narrow | `analyzeParent` returns wrong selector; check `_findItemSelector` |
 | `bad-column-selector` | AI returned document-absolute or multi-match selector | `_validateOrFallbackColumn` in `content-main.js` should catch this; if it didn't, the fallbackSelector is empty or the validation threshold is wrong |
+| `type-unstable-field` | A column's selector-eval distinctValues show mixed data types (text + currency, weight + price) | Position collision in `buildSyntheticSuperItem`; the field was not dropped by the type-filter. Cross-check `selector-eval.json stable=false`. |
 | `prompt-confusion` | AI misunderstood the super-item is synthetic | Prompt missing semantics note; update `COLUMN_USER_TEMPLATE` in `server/analyzer.py` |
 | `missing-debug-artifacts` | `server/.debug/<runId>/` doesn't exist or is empty | Server version is pre-Tier-11; artifacts not written |
 | `other` | None of the above; describe what you found | — |
